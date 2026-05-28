@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot — Admin Panel</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- Topbar -->
+<div class="topbar">
+    <div class="brand">📈 Trading Bot — Admin</div>
+    <div class="topbar-right">
+        <a href="/" class="btn btn-secondary">← Dashboard</a>
+    </div>
+</div>
+
+<div class="admin-layout">
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-item active" onclick="showSection(event, 'settings')">⚙️ Settings</div>
+        <div class="sidebar-item" onclick="showSection(event, 'watchlist')">📋 Watchlist</div>
+        <div class="sidebar-item" onclick="showSection(event, 'fixedTrades')">📊 Fixed Trades</div>
+        <div class="sidebar-item" onclick="showSection(event, 'chartink')">🔗 Chartink</div>
+        <div class="sidebar-item" onclick="showSection(event, 'reports')">📁 Reports</div>
+    </div>
+
+    <!-- Admin Content -->
+    <div class="admin-content">
+
+        <!-- Settings Section -->
+        <div class="section active" id="section-settings">
+            <div class="section-title">Settings</div>
+
+            <div class="card">
+                <div class="card-header"><h3>Broker Credentials (5paisa)</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>App Key</label>
+                            <input type="password" class="form-control" id="appKey" placeholder="Enter App Key">
+                        </div>
+                        <div class="form-group">
+                            <label>Encryption Key</label>
+                            <input type="password" class="form-control" id="encryKey" placeholder="Enter Encryption Key">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>User ID</label>
+                            <input type="password" class="form-control" id="userId" placeholder="Enter User ID">
+                        </div>
+                        <div class="form-group">
+                            <label>Algo ID <span style="color:#8b949e;font-size:11px;">(leave empty if not approved yet)</span></label>
+                            <input type="text" class="form-control" id="algoId" placeholder="Enter Algo ID">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveCredentials()">Save Credentials</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h3>Trade Settings</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Trade Start Time</label>
+                            <input type="time" class="form-control" id="tradeStartTime" value="09:30">
+                        </div>
+                        <div class="form-group">
+                            <label>Trade Close Time</label>
+                            <input type="time" class="form-control" id="tradeCloseTime" value="12:00">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Notification Email</label>
+                        <input type="email" class="form-control" id="notificationEmail" placeholder="sigaramcapitals@gmail.com">
+                    </div>
+                    <button class="btn btn-primary" onclick="saveTradeSettings()">Save Settings</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Watchlist Section -->
+        <div class="section" id="section-watchlist">
+            <div class="section-title">Watchlist (Number 2)</div>
+
+            <div class="card">
+                <div class="card-header"><h3>Add Stock</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Search Stock</label>
+                            <div class="autocomplete-wrapper">
+                                <input type="text" class="form-control" id="stockSearch"
+                                    placeholder="Type stock name e.g. INFY"
+                                    oninput="searchStocks()" autocomplete="off">
+                                <div class="autocomplete-list" id="stockAutocomplete"></div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Scrip Code</label>
+                            <input type="text" class="form-control" id="stockScripCode" placeholder="Auto-filled on selection" readonly>
+                        </div>
+                    </div>
+                    <input type="hidden" id="selectedStockName">
+                    <button class="btn btn-primary" onclick="addStock()">Add to Watchlist</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3>Current Watchlist</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadWatchlist()">Refresh</button>
+                </div>
+                <div class="card-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Stock Name</th>
+                                <th>Scrip Code</th>
+                                <th>Exchange</th>
+                                <th>Added At</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="watchlistBody">
+                            <tr><td colspan="5" class="empty-state">No stocks in watchlist</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Fixed Trades Section -->
+        <div class="section" id="section-fixedTrades">
+            <div class="section-title">Fixed Trades (Number 3)</div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3>Fixed Trades</h3>
+                    <button class="btn btn-primary btn-sm" onclick="openAddTradeModal()">+ Add Trade</button>
+                </div>
+                <div class="card-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Stock</th>
+                                <th>Strike Type</th>
+                                <th>Strike Value</th>
+                                <th>Lot Size</th>
+                                <th>Profit Target</th>
+                                <th>Loss Limit</th>
+                                <th>Month</th>
+                                <th>Trade</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="fixedTradesBody">
+                            <tr><td colspan="8" class="empty-state">No fixed trades configured</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chartink Section -->
+        <div class="section" id="section-chartink">
+            <div class="section-title">Chartink Webhook (Number 4)</div>
+
+            <div class="card">
+                <div class="card-header"><h3>Webhook URL</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <p style="color:#8b949e;margin-bottom:12px;font-size:13px;">
+                        Copy this URL into your Chartink screener alert. Chartink will POST to this URL whenever your screener fires.
+                    </p>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="text" class="form-control" id="webhookUrl" readonly
+                            style="font-family:monospace;font-size:12px;color:#58a6ff;">
+                        <button class="btn btn-secondary btn-sm" onclick="copyWebhookUrl()">Copy</button>
+                    </div>
+                    <p style="color:#8b949e;margin-top:12px;font-size:12px;">
+                        In Chartink: Alert → Webhook → paste the URL above.<br>
+                        The bot only trades stocks that are in your <b>Watchlist</b>. All others are silently skipped.
+                    </p>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h3>Webhook Trade Configuration</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <p style="color:#8b949e;margin-bottom:16px;font-size:13px;">
+                        This single configuration applies to <b>all</b> stocks sent by Chartink — regardless of which stock it is.
+                    </p>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Trade Type</label>
+                            <select class="form-control" id="webhookTradeType">
+                                <option value="collar">Collar (Buy Futures + Sell CE + Buy PE)</option>
+                                <option value="option">Naked CE Sell only</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Month</label>
+                            <select class="form-control" id="webhookMonthType">
+                                <option value="current">Current Month</option>
+                                <option value="next">Next Month</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Strike Type</label>
+                            <select class="form-control" id="webhookStrikeType">
+                                <option value="percent">Percent above price (e.g. 2%)</option>
+                                <option value="fixed">Fixed strike value</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Strike Value</label>
+                            <input type="number" class="form-control" id="webhookStrikeValue"
+                                placeholder="e.g. 2 for 2% or 1150 for fixed">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Lot Size</label>
+                            <input type="number" class="form-control" id="webhookLotSize"
+                                placeholder="e.g. 1" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label>Profit Target (₹)</label>
+                            <input type="number" class="form-control" id="webhookProfit" placeholder="e.g. 15000">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Loss Limit (₹)</label>
+                            <input type="number" class="form-control" id="webhookLoss" placeholder="e.g. 12000">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveWebhookSettings()">Save Configuration</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h3>Test Webhook</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <p style="color:#8b949e;margin-bottom:12px;font-size:13px;">
+                        Simulate a Chartink signal for a stock already in your watchlist. Requires broker connected and Trade switch ON.
+                    </p>
+                    <div style="display:flex;gap:8px;">
+                        <input type="text" class="form-control" id="testWebhookStock"
+                            placeholder="e.g. INFY" style="max-width:200px;">
+                        <button class="btn btn-warning" onclick="testWebhook()">Fire Test Signal</button>
+                    </div>
+                    <div id="testWebhookResult" style="margin-top:12px;font-size:13px;display:none;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Reports Section -->
+        <div class="section" id="section-reports">
+            <div class="section-title">Monthly Reports</div>
+
+            <div class="card">
+                <div class="card-header"><h3>Generate Report</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Year</label>
+                            <input type="number" class="form-control" id="reportYear" value="2026" min="2024" max="2030">
+                        </div>
+                        <div class="form-group">
+                            <label>Month</label>
+                            <select class="form-control" id="reportMonth">
+                                <option value="1">January</option>
+                                <option value="2">February</option>
+                                <option value="3">March</option>
+                                <option value="4">April</option>
+                                <option value="5" selected>May</option>
+                                <option value="6">June</option>
+                                <option value="7">July</option>
+                                <option value="8">August</option>
+                                <option value="9">September</option>
+                                <option value="10">October</option>
+                                <option value="11">November</option>
+                                <option value="12">December</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="generateReport()">Generate Report</button>
+                </div>
+            </div>
+
+            <div id="reportOutput" style="display:none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 id="reportTitle">Report</h3>
+                        <button class="btn btn-secondary btn-sm" onclick="downloadReport()">Download HTML</button>
+                    </div>
+                    <div class="card-body" style="padding:20px;">
+                        <div class="stats-row" style="margin-bottom:16px;">
+                            <div class="stat-card">
+                                <div class="label">Total Trades</div>
+                                <div class="value neutral" id="rTotalTrades">0</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="label">Net P&L</div>
+                                <div class="value" id="rNetPnl">₹0</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="label">Win / Loss</div>
+                                <div class="value neutral" id="rWinLoss">0 / 0</div>
+                            </div>
+                        </div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Stock</th>
+                                    <th>Source</th>
+                                    <th>Close Reason</th>
+                                    <th>P&L</th>
+                                    <th>Placed At</th>
+                                    <th>Closed At</th>
+                                </tr>
+                            </thead>
+                            <tbody id="reportTradesBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Add/Edit Fixed Trade Modal -->
+<div class="modal-overlay" id="tradeModal">
+    <div class="modal">
+        <h3 id="tradeModalTitle">Add Fixed Trade</h3>
+        <input type="hidden" id="editTradeId">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Stock Name</label>
+                <input type="text" class="form-control" id="ftStockName" placeholder="e.g. INFY">
+            </div>
+            <div class="form-group">
+                <label>Scrip Code</label>
+                <input type="text" class="form-control" id="ftScripCode" placeholder="Optional">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Strike Type</label>
+                <select class="form-control" id="ftStrikeType">
+                    <option value="fixed">Fixed (exact strike)</option>
+                    <option value="percent">Percent (% upside)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Strike Value</label>
+                <input type="number" class="form-control" id="ftStrikeValue" placeholder="e.g. 1150 or 2">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Profit Target (₹)</label>
+                <input type="number" class="form-control" id="ftProfit" placeholder="e.g. 10000">
+            </div>
+            <div class="form-group">
+                <label>Loss Limit (₹)</label>
+                <input type="number" class="form-control" id="ftLoss" placeholder="e.g. 12000">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Month Type</label>
+                <select class="form-control" id="ftMonthType">
+                    <option value="current">Current Month</option>
+                    <option value="next">Next Month</option>
+                    <option value="option">Option (CE Sell Only)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Lot Size <span style="color:#8b949e;font-size:11px;">(e.g. 300 for INFY)</span></label>
+                <input type="number" class="form-control" id="ftLotSize" placeholder="e.g. 300" min="1" value="1">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Trade</label>
+                <select class="form-control" id="ftIsTrade">
+                    <option value="true">Yes (Live Trade)</option>
+                    <option value="false">No (Paper Trade)</option>
+                </select>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeTradeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveFixedTrade()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script src="/static/js/admin.js"></script>
+</body>
+</html>

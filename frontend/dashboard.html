@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot — Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- Topbar -->
+<div class="topbar">
+    <div class="brand">📈 Trading Bot</div>
+    <div class="topbar-right">
+        <div class="broker-status">
+            <div class="status-dot" id="brokerDot"></div>
+            <span id="brokerStatusText">Disconnected</span>
+        </div>
+        <button class="btn btn-secondary" onclick="connectBroker()">Connect Broker</button>
+        <button class="btn btn-warning" id="runNowBtn" onclick="runFixedTradesNow()">Run Now</button>
+        <div class="trade-toggle">
+            <span id="tradingLabel" style="color:#e74c3c;">STOPPED</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="tradingToggle" onchange="toggleTrading()">
+                <span class="toggle-slider"></span>
+            </label>
+            <span>Trade</span>
+        </div>
+        <a href="/admin" class="btn btn-secondary">Admin Panel</a>
+    </div>
+</div>
+
+<!-- Main Content -->
+<div class="main">
+
+    <!-- Stat Cards -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="label">Total P&L</div>
+            <div class="value" id="totalPnl">₹0.00</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Open Trades</div>
+            <div class="value neutral" id="openTradesCount">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Closed Trades</div>
+            <div class="value neutral" id="closedTradesCount">0</div>
+        </div>
+    </div>
+
+    <!-- Live Trades -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Live Trades</h3>
+            <button class="btn btn-secondary btn-sm" onclick="loadLiveTrades()">Refresh</button>
+        </div>
+        <div class="card-body">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Stock</th>
+                        <th>Source</th>
+                        <th>Type</th>
+                        <th>Futures Entry</th>
+                        <th>CE Entry</th>
+                        <th>PE Entry</th>
+                        <th>Target</th>
+                        <th>Limit</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="liveTradesBody">
+                    <tr><td colspan="9" class="empty-state">No open trades</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Trade History -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Trade History</h3>
+            <button class="btn btn-secondary btn-sm" onclick="loadTradeHistory()">Refresh</button>
+        </div>
+        <div class="card-body">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Stock</th>
+                        <th>Source</th>
+                        <th>Type</th>
+                        <th>Close Reason</th>
+                        <th>P&L</th>
+                        <th>Placed At</th>
+                        <th>Closed At</th>
+                    </tr>
+                </thead>
+                <tbody id="tradeHistoryBody">
+                    <tr><td colspan="7" class="empty-state">No closed trades</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Logs -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Logs</h3>
+            <div style="display:flex;gap:8px;">
+                <select class="form-control" id="logLevelFilter" style="width:120px;padding:5px 8px;font-size:12px;" onchange="loadLogs()">
+                    <option value="">All</option>
+                    <option value="INFO">INFO</option>
+                    <option value="WARNING">WARNING</option>
+                    <option value="ERROR">ERROR</option>
+                </select>
+                <button class="btn btn-secondary btn-sm" onclick="loadLogs()">Refresh</button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="logs-container" id="logsContainer">
+                <div class="empty-state">No logs yet</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script src="/static/js/dashboard.js"></script>
+</body>
+</html>
