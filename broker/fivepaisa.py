@@ -233,10 +233,19 @@ def get_market_quote(access_token, scrip_list):
             "Data": data_items
         }
     }
+
+    logger.info(f"[DEBUG] MarketSnapshot request payload: {payload}")
+
     try:
         response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
         response.raise_for_status()
         data = response.json()
+
+        logger.info(f"[DEBUG] MarketSnapshot raw response: {data}")
+        logger.info(f"[DEBUG] MarketSnapshot head: {data.get('head')}")
+        logger.info(f"[DEBUG] MarketSnapshot body keys: {list(data.get('body', {}).keys())}")
+        body_data = data.get("body", {}).get("Data", [])
+        logger.info(f"[DEBUG] MarketSnapshot Data array length: {len(body_data) if body_data else 0}")
 
         if _head_ok(data):
             return {"success": True, "quotes": data["body"]["Data"]}
