@@ -109,7 +109,7 @@ async function loadLiveTrades() {
             <td style="color:#2ecc71;">₹${t.profit_target}</td>
             <td style="color:#e74c3c;">₹${t.loss_limit}</td>
             <td>
-                ${!t.is_paper_trade ? `<button class="btn btn-danger btn-sm" onclick="closeTrade(${t.id}, '${t.stock_name}')">Close</button>` : "—"}
+                <button class="btn btn-danger btn-sm" onclick="closeTrade(${t.id}, '${t.stock_name}')">Close</button>
             </td>
         </tr>
     `).join("");
