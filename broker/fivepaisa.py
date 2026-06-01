@@ -234,18 +234,18 @@ def get_market_quote(access_token, scrip_list):
         }
     }
 
-    logger.info(f"[DEBUG] MarketSnapshot request payload: {payload}")
+    print(f"[DEBUG] MarketSnapshot request payload: {payload}", flush=True)
 
     try:
         response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
         response.raise_for_status()
         data = response.json()
 
-        logger.info(f"[DEBUG] MarketSnapshot raw response: {data}")
-        logger.info(f"[DEBUG] MarketSnapshot head: {data.get('head')}")
-        logger.info(f"[DEBUG] MarketSnapshot body keys: {list(data.get('body', {}).keys())}")
+        print(f"[DEBUG] MarketSnapshot raw response: {data}", flush=True)
+        print(f"[DEBUG] MarketSnapshot head: {data.get('head')}", flush=True)
+        print(f"[DEBUG] MarketSnapshot body keys: {list(data.get('body', {}).keys())}", flush=True)
         body_data = data.get("body", {}).get("Data", [])
-        logger.info(f"[DEBUG] MarketSnapshot Data array length: {len(body_data) if body_data else 0}")
+        print(f"[DEBUG] MarketSnapshot Data array length: {len(body_data) if body_data else 0}", flush=True)
 
         if _head_ok(data):
             return {"success": True, "quotes": data["body"]["Data"]}
