@@ -247,7 +247,12 @@ def get_market_quote(access_token, scrip_list):
         print(f"[DEBUG] MarketSnapshot Data array length: {len(body_data) if body_data else 0}", flush=True)
 
         if _head_ok(data):
-            return {"success": True, "quotes": data["body"]["Data"]}
+            # Normalize LastTradedPrice → LastRate for consistent usage across the codebase
+            quotes = []
+            for q in data["body"]["Data"]:
+                q["LastRate"] = q.get("LastTradedPrice") or q.get("LastRate", 0)
+                quotes.append(q)
+            return {"success": True, "quotes": quotes}
 
         logger.error(f"get_market_quote failed: {_head_error(data)}")
         return {"success": False, "error": _head_error(data)}
