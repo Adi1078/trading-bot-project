@@ -215,13 +215,13 @@ def get_market_quote(access_token, scrip_list):
     scrip_list: [{"exchange": "N", "exchange_type": "D", "scrip_code": "1660"}, ...]
     """
     app_key, _, _, _, client_code = _creds()
-    url = f"{BASE_URL}/V1/MarketSnapshot"
+    url = f"{BASE_URL}/MarketSnapshot"
     data_items = [
         {
-            "Exch": s["exchange"],
-            "ExchType": s["exchange_type"],
-            "ScripCode": int(s["scrip_code"]),
-            "ATMType": " "
+            "Exchange": s["exchange"],
+            "ExchangeType": s["exchange_type"],
+            "ScripCode": str(s["scrip_code"]),
+            "ScripData": ""
         }
         for s in scrip_list
     ]
@@ -229,7 +229,6 @@ def get_market_quote(access_token, scrip_list):
         "head": {"key": app_key},
         "body": {
             "ClientCode": client_code,
-            "Count": len(data_items),
             "Data": data_items
         }
     }
