@@ -25,14 +25,21 @@ async function checkBrokerStatus() {
     const data = await api("/api/auth/status");
     const dot = document.getElementById("brokerDot");
     const text = document.getElementById("brokerStatusText");
+    const btn = document.getElementById("connectBrokerBtn");
     if (data.connected) {
         dot.classList.add("connected");
         text.textContent = "Connected";
         text.style.color = "#2ecc71";
+        btn.classList.remove("btn-secondary");
+        btn.classList.add("btn-primary");
+        btn.textContent = "Broker Connected";
     } else {
         dot.classList.remove("connected");
         text.textContent = "Disconnected";
         text.style.color = "#e74c3c";
+        btn.classList.remove("btn-primary");
+        btn.classList.add("btn-secondary");
+        btn.textContent = "Connect Broker";
     }
 }
 
