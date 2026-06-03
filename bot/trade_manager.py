@@ -34,6 +34,17 @@ def _get_expiry(month_type: str):
     return get_next_expiry() if month_type == "next" else get_current_expiry()
 
 
+def _extract_ce(option_chain):
+    """
+    Return the single CE option the chain was built around.
+    get_option_chain() already selects the CE at the nearest valid strike to the
+    requested one, so we use that directly instead of exact-matching a strike that
+    may not exist on the exchange (e.g. a typed fixed strike of 1223 when only
+    1220/1230 exist).
+    """
+    return next((o for o in option_chain if o.get("CPType") == "CE"), None)
+
+
 # ─── Fixed Trades (Number 3) ───────────────────────────────────────────────────
 
 def run_fixed_trades():
@@ -124,15 +135,13 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
 
     option_chain = chain_result["option_chain"]
 
-    # Step 4: Find CE option in chain — extract scrip code and premium
-    ce_option = next(
-        (o for o in option_chain if o.get("StrikeRate") == ce_strike and o.get("CPType") == "CE"),
-        None
-    )
+    # Step 4: Use the CE the chain selected (nearest valid strike) — extract scrip code and premium
+    ce_option = _extract_ce(option_chain)
     if not ce_option:
-        _save_log(db, "ERROR", f"{ft.stock_name}: CE strike {ce_strike} not found in option chain")
+        _save_log(db, "ERROR", f"{ft.stock_name}: no CE option returned in chain near strike {ce_strike}")
         return
 
+    ce_strike = ce_option.get("StrikeRate", ce_strike)  # actual exchange strike
     ce_scrip_code = str(ce_option.get("Scripcode", ""))
     ce_premium = ce_option.get("LastRate", 0)
 
@@ -237,15 +246,12 @@ def _place_option_trade(db, settings, ft: FixedTrade):
         _save_log(db, "ERROR", f"{ft.stock_name}: option trade failed to get chain - {chain_result['error']}")
         return
 
-    ce_option = next(
-        (o for o in chain_result["option_chain"]
-         if o.get("StrikeRate") == ce_strike and o.get("CPType") == "CE"),
-        None
-    )
+    ce_option = _extract_ce(chain_result["option_chain"])
     if not ce_option:
-        _save_log(db, "ERROR", f"{ft.stock_name}: CE strike {ce_strike} not found in option chain")
+        _save_log(db, "ERROR", f"{ft.stock_name}: no CE option returned in chain near strike {ce_strike}")
         return
 
+    ce_strike = ce_option.get("StrikeRate", ce_strike)  # actual exchange strike
     ce_scrip_code = str(ce_option.get("Scripcode", ""))
     if not ce_scrip_code:
         _save_log(db, "ERROR", f"{ft.stock_name}: CE option has no scrip code")
@@ -313,11 +319,9 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
     chain_result = fivepaisa.get_option_chain(settings.access_token, ft.stock_name, expiry, ce_strike)
     if chain_result["success"]:
         option_chain = chain_result["option_chain"]
-        ce_option = next(
-            (o for o in option_chain if o.get("StrikeRate") == ce_strike and o.get("CPType") == "CE"),
-            None
-        )
+        ce_option = _extract_ce(option_chain)
         if ce_option:
+            ce_strike = ce_option.get("StrikeRate", ce_strike)  # actual exchange strike
             ce_premium = ce_option.get("LastRate", ce_strike)
 
         pe_options = [
@@ -410,14 +414,12 @@ def run_webhook_trade(stock_name: str):
 
         option_chain = chain_result["option_chain"]
 
-        ce_option = next(
-            (o for o in option_chain if o.get("StrikeRate") == ce_strike and o.get("CPType") == "CE"),
-            None
-        )
+        ce_option = _extract_ce(option_chain)
         if not ce_option:
-            _save_log(db, "ERROR", f"Webhook {stock_name}: CE strike {ce_strike} not found in chain")
+            _save_log(db, "ERROR", f"Webhook {stock_name}: no CE option returned in chain near strike {ce_strike}")
             return
 
+        ce_strike = ce_option.get("StrikeRate", ce_strike)  # actual exchange strike
         ce_scrip_code = str(ce_option.get("Scripcode", ""))
         ce_premium = ce_option.get("LastRate", 0)
 
