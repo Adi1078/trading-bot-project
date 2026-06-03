@@ -233,18 +233,10 @@ def get_market_quote(access_token, scrip_list):
         }
     }
 
-    print(f"[DEBUG] MarketSnapshot request payload: {payload}", flush=True)
-
     try:
         response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
         response.raise_for_status()
         data = response.json()
-
-        print(f"[DEBUG] MarketSnapshot raw response: {data}", flush=True)
-        print(f"[DEBUG] MarketSnapshot head: {data.get('head')}", flush=True)
-        print(f"[DEBUG] MarketSnapshot body keys: {list(data.get('body', {}).keys())}", flush=True)
-        body_data = data.get("body", {}).get("Data", [])
-        print(f"[DEBUG] MarketSnapshot Data array length: {len(body_data) if body_data else 0}", flush=True)
 
         if _head_ok(data):
             # Normalize LastTradedPrice → LastRate for consistent usage across the codebase
@@ -351,12 +343,14 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     )
     ce_instrument = ce_candidates[0] if ce_candidates else None
 
-    # Find PE options at strikes below or equal to CE strike
+    # Find PE options at strikes below or equal to CE strike.
+    # Take 30 strikes so the valid PE (premium < CE premium) is always inside the window —
+    # it can sit many strikes below the CE depending on the volatility skew.
     actual_ce_strike = ce_instrument["StrikeRate"] if ce_instrument else float(strike_price)
     pe_instruments = sorted(
         [o for o in instruments if o["CpType"] == "PE" and o["StrikeRate"] <= actual_ce_strike],
         key=lambda o: o["StrikeRate"], reverse=True
-    )[:10]
+    )[:30]
 
     # Fetch live prices via MarketSnapshot
     scrip_list = []
