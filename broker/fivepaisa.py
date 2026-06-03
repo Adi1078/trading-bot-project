@@ -306,11 +306,28 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
 
     if cache_key not in _option_cache:
         rows = _load_raw_scrip_master()
+
+        # Find the actual expiry in scrip master closest to our target date
+        year_month = expiry_str[:7]  # "2026-06"
+        available_expiries = set()
+        for row in rows:
+            if (row.get("SymbolRoot", "").upper() == stock_name.upper() and
+                    row.get("ScripType") in ("CE", "PE") and
+                    row.get("Expiry", "").startswith(year_month)):
+                available_expiries.add(row.get("Expiry", "")[:10])
+
+        actual_expiry = expiry_str
+        if available_expiries:
+            # Pick the expiry closest to our target
+            actual_expiry = min(available_expiries, key=lambda d: abs((
+                expiry_date - __import__('datetime').date.fromisoformat(d)
+            ).days))
+
         options = []
         for row in rows:
             if (row.get("SymbolRoot", "").upper() != stock_name.upper() or
                     row.get("ScripType") not in ("CE", "PE") or
-                    expiry_str not in row.get("Expiry", "")):
+                    not row.get("Expiry", "").startswith(actual_expiry)):
                 continue
             try:
                 options.append({
@@ -321,7 +338,7 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
             except (ValueError, TypeError):
                 continue
         _option_cache[cache_key] = options
-        logger.info(f"Option cache built for {stock_name} {expiry_str}: {len(options)} contracts")
+        logger.info(f"Option cache built for {stock_name} {actual_expiry}: {len(options)} contracts")
 
     instruments = _option_cache.get(cache_key, [])
     if not instruments:
