@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime
-from datetime import datetime
 from database import Base
+from utils.helpers import get_ist_now
 
 
 class Trade(Base):
@@ -37,5 +37,5 @@ class Trade(Base):
     close_reason = Column(String, nullable=True)          # "profit", "loss", "manual", "expiry", "time"
 
     pnl = Column(Float, nullable=True)
-    placed_at = Column(DateTime, default=datetime.now)
+    placed_at = Column(DateTime, default=get_ist_now)
     closed_at = Column(DateTime, nullable=True)

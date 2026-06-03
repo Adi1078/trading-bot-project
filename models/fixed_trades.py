@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime
-from datetime import datetime
 from database import Base
+from utils.helpers import get_ist_now
 
 
 class FixedTrade(Base):
@@ -17,5 +17,5 @@ class FixedTrade(Base):
     lot_size = Column(Integer, default=1)
     is_trade = Column(Boolean, default=True)       # False = paper trade
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=get_ist_now)
+    updated_at = Column(DateTime, default=get_ist_now, onupdate=get_ist_now)

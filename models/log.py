@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime
-from datetime import datetime
 from database import Base
+from utils.helpers import get_ist_now
 
 
 class Log(Base):
@@ -9,4 +9,4 @@ class Log(Base):
     id = Column(Integer, primary_key=True, index=True)
     level = Column(String, nullable=False)     # "INFO", "ERROR", "WARNING"
     message = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=get_ist_now)

@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime
-from datetime import datetime
 from database import Base
+from utils.helpers import get_ist_now
 
 
 class Watchlist(Base):
@@ -11,4 +11,4 @@ class Watchlist(Base):
     scrip_code = Column(String, nullable=True)
     exchange = Column(String, default="N")
     exchange_type = Column(String, default="D")
-    added_at = Column(DateTime, default=datetime.now)
+    added_at = Column(DateTime, default=get_ist_now)
