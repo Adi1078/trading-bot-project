@@ -262,38 +262,118 @@ def get_market_quote(access_token, scrip_list):
         return {"success": False, "error": str(e)}
 
 
+_raw_scrip_cache = None  # full scrip master with all columns, cached once per session
+_option_cache = {}      # option instruments by (stock, expiry_str)
+
+
+def _load_raw_scrip_master():
+    """Download and cache full scrip master CSV with all columns."""
+    global _raw_scrip_cache
+    if _raw_scrip_cache is not None:
+        return _raw_scrip_cache
+    url = "https://images.5paisa.com/website/scripmaster-csv-format.csv"
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        lines = response.text.strip().split("\n")
+        headers = [h.strip() for h in lines[0].split(",")]
+        rows = []
+        for line in lines[1:]:
+            values = line.split(",")
+            if len(values) < len(headers):
+                continue
+            rows.append(dict(zip(headers, [v.strip() for v in values])))
+        _raw_scrip_cache = rows
+        logger.info(f"Raw scrip master loaded: {len(rows)} rows")
+        return rows
+    except Exception as e:
+        logger.error(f"Failed to load raw scrip master: {str(e)}")
+        return []
+
+
 def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     """
-    Fetch option chain for a stock to find available CE/PE strikes with premiums.
+    Build option chain from scrip master + MarketSnapshot.
+    Replaces the unavailable V1/OptionChain endpoint.
     expiry_date: datetime.date object
-    strike_price: approximate ATM strike to fetch chain around
+    strike_price: approximate CE strike to look for
     """
-    app_key, _, _, _, _ = _creds()
-    url = f"{BASE_URL}/V1/OptionChain"
-    payload = {
-        "head": {"key": app_key},
-        "body": {
-            "Exch": "N",
-            "ExchType": "D",
-            "Symbol": stock_name,
-            "ExpiryDate": expiry_date.strftime("%Y%m%d"),
-            "StrikePrice": strike_price
-        }
-    }
-    try:
-        response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
-        response.raise_for_status()
-        data = response.json()
+    global _option_cache
+    expiry_str = expiry_date.strftime("%Y-%m-%d")
+    cache_key = f"{stock_name.upper()}_{expiry_str}"
 
-        if _head_ok(data):
-            return {"success": True, "option_chain": data["body"]["OptionChainDetails"]}
+    if cache_key not in _option_cache:
+        rows = _load_raw_scrip_master()
+        options = []
+        for row in rows:
+            if (row.get("Exch") != "N" or
+                    row.get("ExchType") != "D" or
+                    row.get("Root", "").upper() != stock_name.upper() or
+                    row.get("CpType") not in ("CE", "PE") or
+                    expiry_str not in row.get("Expiry", "")):
+                continue
+            try:
+                options.append({
+                    "ScripCode": row.get("Scripcode", ""),
+                    "StrikeRate": float(row.get("StrikeRate", 0)),
+                    "CpType": row.get("CpType", ""),
+                })
+            except (ValueError, TypeError):
+                continue
+        _option_cache[cache_key] = options
+        logger.info(f"Option cache built for {stock_name} {expiry_str}: {len(options)} contracts")
 
-        logger.error(f"get_option_chain failed for {stock_name}: {_head_error(data)}")
-        return {"success": False, "error": _head_error(data)}
+    instruments = _option_cache.get(cache_key, [])
+    if not instruments:
+        return {"success": False, "error": f"No options found for {stock_name} expiry {expiry_str} in scrip master"}
 
-    except Exception as e:
-        logger.error(f"get_option_chain exception for {stock_name}: {str(e)}")
-        return {"success": False, "error": str(e)}
+    # Find CE at nearest available strike >= strike_price
+    ce_candidates = sorted(
+        [o for o in instruments if o["CpType"] == "CE" and o["StrikeRate"] >= float(strike_price)],
+        key=lambda o: o["StrikeRate"]
+    )
+    ce_instrument = ce_candidates[0] if ce_candidates else None
+
+    # Find PE options at strikes below or equal to CE strike
+    actual_ce_strike = ce_instrument["StrikeRate"] if ce_instrument else float(strike_price)
+    pe_instruments = sorted(
+        [o for o in instruments if o["CpType"] == "PE" and o["StrikeRate"] <= actual_ce_strike],
+        key=lambda o: o["StrikeRate"], reverse=True
+    )[:10]
+
+    # Fetch live prices via MarketSnapshot
+    scrip_list = []
+    if ce_instrument:
+        scrip_list.append({"exchange": "N", "exchange_type": "D", "scrip_code": ce_instrument["ScripCode"]})
+    for pe in pe_instruments:
+        scrip_list.append({"exchange": "N", "exchange_type": "D", "scrip_code": pe["ScripCode"]})
+
+    if not scrip_list:
+        return {"success": False, "error": f"No option scrip codes found for {stock_name}"}
+
+    quote_result = get_market_quote(access_token, scrip_list)
+    if not quote_result["success"]:
+        return {"success": False, "error": f"MarketSnapshot failed for options: {quote_result['error']}"}
+
+    quotes = {str(q["ScripCode"]): q["LastRate"] for q in quote_result["quotes"]}
+
+    option_chain = []
+    if ce_instrument:
+        option_chain.append({
+            "StrikeRate": ce_instrument["StrikeRate"],
+            "CPType": "CE",
+            "Scripcode": ce_instrument["ScripCode"],
+            "LastRate": quotes.get(str(ce_instrument["ScripCode"]), 0)
+        })
+    for pe in pe_instruments:
+        option_chain.append({
+            "StrikeRate": pe["StrikeRate"],
+            "CPType": "PE",
+            "Scripcode": pe["ScripCode"],
+            "LastRate": quotes.get(str(pe["ScripCode"]), 0)
+        })
+
+    return {"success": True, "option_chain": option_chain}
 
 
 _scrip_cache = None  # downloaded once per server session, never on every search
