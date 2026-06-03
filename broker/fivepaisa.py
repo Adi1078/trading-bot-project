@@ -267,13 +267,13 @@ _option_cache = {}      # option instruments by (stock, expiry_str)
 
 
 def _load_raw_scrip_master():
-    """Download scrip master CSV, keeping only NSE derivative options to save memory."""
+    """Download NSE F&O scrip master from official API, keeping only CE/PE options."""
     global _raw_scrip_cache
     if _raw_scrip_cache is not None:
         return _raw_scrip_cache
-    url = "https://images.5paisa.com/website/scripmaster-csv-format.csv"
+    url = "https://Openapi.5paisa.com/VendorsAPI/Service1.svc/ScripMaster/segment/nse_fo"
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=60)
         response.raise_for_status()
         lines = response.text.strip().split("\n")
         headers = [h.strip() for h in lines[0].split(",")]
@@ -283,13 +283,13 @@ def _load_raw_scrip_master():
             if len(values) < len(headers):
                 continue
             row = dict(zip(headers, [v.strip() for v in values]))
-            if row.get("Exch") == "N" and row.get("ExchType") == "D" and row.get("CpType") in ("CE", "PE"):
+            if row.get("ScripType") in ("CE", "PE"):
                 rows.append(row)
         _raw_scrip_cache = rows
-        logger.info(f"Option scrip master loaded: {len(rows)} NSE F&O option rows")
+        logger.info(f"NSE F&O option scrip master loaded: {len(rows)} CE/PE contracts")
         return rows
     except Exception as e:
-        logger.error(f"Failed to load raw scrip master: {str(e)}")
+        logger.error(f"Failed to load NSE F&O scrip master: {str(e)}")
         return []
 
 
@@ -308,17 +308,15 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
         rows = _load_raw_scrip_master()
         options = []
         for row in rows:
-            if (row.get("Exch") != "N" or
-                    row.get("ExchType") != "D" or
-                    row.get("Root", "").upper() != stock_name.upper() or
-                    row.get("CpType") not in ("CE", "PE") or
+            if (row.get("SymbolRoot", "").upper() != stock_name.upper() or
+                    row.get("ScripType") not in ("CE", "PE") or
                     expiry_str not in row.get("Expiry", "")):
                 continue
             try:
                 options.append({
-                    "ScripCode": row.get("Scripcode", ""),
+                    "ScripCode": row.get("ScripCode", ""),
                     "StrikeRate": float(row.get("StrikeRate", 0)),
-                    "CpType": row.get("CpType", ""),
+                    "CpType": row.get("ScripType", ""),
                 })
             except (ValueError, TypeError):
                 continue
