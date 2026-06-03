@@ -5,7 +5,7 @@ from models.trade import Trade
 from models.settings import Settings
 from models.log import Log
 from broker.fivepaisa import cancel_order
-from utils.helpers import get_ist_now
+from utils.helpers import get_ist_now, calculate_trade_pnl
 
 router = APIRouter()
 
@@ -60,6 +60,18 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
                 result = cancel_order(settings.access_token, order_id, None, "N", "D")
                 if not result["success"]:
                     errors.append(result["error"])
+
+    # Compute P&L from current market prices before closing (same as auto-close path)
+    from bot.trade_manager import _fetch_current_prices
+    current_prices = _fetch_current_prices(db, settings, trade)
+    if current_prices:
+        trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = current_prices
+        trade.pnl = calculate_trade_pnl(
+            trade.futures_entry_price, trade.futures_exit_price,
+            trade.ce_entry_price, trade.ce_exit_price,
+            trade.pe_entry_price, trade.pe_exit_price,
+            lot_size=trade.lot_size or 1
+        )
 
     trade.status = "closed"
     trade.close_reason = "manual"
