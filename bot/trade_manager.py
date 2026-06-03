@@ -305,6 +305,28 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
             return
 
     ce_strike = calculate_ce_strike(futures_price, ft.strike_type, ft.strike_value, ft.stock_name)
+    expiry = _get_expiry(ft.month_type)
+
+    # Try to fetch option chain to get real CE and PE premiums
+    ce_premium = ce_strike  # fallback to strike value if chain unavailable
+    pe_premium = None
+    chain_result = fivepaisa.get_option_chain(settings.access_token, ft.stock_name, expiry, ce_strike)
+    if chain_result["success"]:
+        option_chain = chain_result["option_chain"]
+        ce_option = next(
+            (o for o in option_chain if o.get("StrikeRate") == ce_strike and o.get("CPType") == "CE"),
+            None
+        )
+        if ce_option:
+            ce_premium = ce_option.get("LastRate", ce_strike)
+
+        pe_options = [
+            {"strike": o["StrikeRate"], "premium": o["LastRate"], "type": "PE"}
+            for o in option_chain if o.get("CPType") == "PE"
+        ]
+        pe_strike, pe_prem = find_pe_strike(pe_options, ce_premium)
+        if pe_strike is not None:
+            pe_premium = pe_prem
 
     trade = Trade(
         stock_name=ft.stock_name,
@@ -314,13 +336,14 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
         month_type=ft.month_type,
         lot_size=ft.lot_size or 1,
         futures_entry_price=futures_price,
-        ce_entry_price=ce_strike,
+        ce_entry_price=ce_premium,
+        pe_entry_price=pe_premium,
         profit_target=ft.profit_target,
         loss_limit=ft.loss_limit,
         status="open"
     )
     db.add(trade)
-    _save_log(db, "INFO", f"{ft.stock_name}: paper trade recorded — entry {futures_price}, CE strike {ce_strike}")
+    _save_log(db, "INFO", f"{ft.stock_name}: paper trade recorded — entry {futures_price}, CE {ce_strike}@{ce_premium}, PE @{pe_premium}")
     db.commit()
 
 
@@ -525,6 +548,38 @@ def monitor_open_trades():
         db.close()
 
 
+def _fetch_current_prices(db, settings, trade: Trade):
+    """Fetch current prices for all legs. Returns tuple (futures, ce, pe) or None."""
+    if trade.is_paper_trade:
+        watchlist_stock = db.query(Watchlist).filter(Watchlist.stock_name.ilike(trade.stock_name)).first()
+        if not watchlist_stock:
+            return None
+        quote_result = fivepaisa.get_market_quote(
+            settings.access_token,
+            [{"exchange": "N", "exchange_type": "C", "scrip_code": watchlist_stock.scrip_code}]
+        )
+        if quote_result["success"] and quote_result["quotes"]:
+            return (quote_result["quotes"][0]["LastRate"], trade.ce_entry_price, trade.pe_entry_price)
+        return None
+
+    scrip_list = [
+        {"exchange": "N", "exchange_type": "D", "scrip_code": code}
+        for code in [trade.futures_scrip_code, trade.ce_scrip_code, trade.pe_scrip_code]
+        if code
+    ]
+    if not scrip_list:
+        return None
+    quote_result = fivepaisa.get_market_quote(settings.access_token, scrip_list)
+    if not quote_result["success"]:
+        return None
+    quotes = {str(q["ScripCode"]): q["LastRate"] for q in quote_result["quotes"]}
+    return (
+        quotes.get(str(trade.futures_scrip_code), trade.futures_entry_price),
+        quotes.get(str(trade.ce_scrip_code), trade.ce_entry_price),
+        quotes.get(str(trade.pe_scrip_code), trade.pe_entry_price)
+    )
+
+
 def _check_and_close_if_needed(db, settings, trade: Trade):
     """Evaluate a single trade and close it if any exit condition is met."""
 
@@ -532,16 +587,18 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
 
     # Force close on expiry day at 12:00 PM
     if is_last_trading_day() and now.hour >= 12:
-        _close_trade(db, settings, trade, reason="expiry")
+        current_prices = _fetch_current_prices(db, settings, trade)
+        _close_trade(db, settings, trade, reason="expiry", current_prices=current_prices)
         return
 
     # Force close at configured close time
     close_hour, close_minute = map(int, (settings.trade_close_time or "12:00").split(":"))
     if now.hour > close_hour or (now.hour == close_hour and now.minute >= close_minute):
-        _close_trade(db, settings, trade, reason="time")
+        current_prices = _fetch_current_prices(db, settings, trade)
+        _close_trade(db, settings, trade, reason="time", current_prices=current_prices)
         return
 
-    # Paper trades: no real prices to check
+    # Paper trades: no real-time P&L monitoring
     if trade.is_paper_trade:
         return
 
@@ -556,11 +613,11 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
         _save_log(db, "WARNING", f"Could not fetch prices for trade {trade.id} ({trade.stock_name})")
         return
 
-    quotes = {q["ScripCode"]: q["LastRate"] for q in quote_result["quotes"]}
+    quotes = {str(q["ScripCode"]): q["LastRate"] for q in quote_result["quotes"]}
 
-    current_futures = quotes.get(trade.futures_scrip_code, trade.futures_entry_price)
-    current_ce = quotes.get(trade.ce_scrip_code, trade.ce_entry_price)
-    current_pe = quotes.get(trade.pe_scrip_code, trade.pe_entry_price)
+    current_futures = quotes.get(str(trade.futures_scrip_code), trade.futures_entry_price)
+    current_ce = quotes.get(str(trade.ce_scrip_code), trade.ce_entry_price)
+    current_pe = quotes.get(str(trade.pe_scrip_code), trade.pe_entry_price)
 
     current_pnl = calculate_trade_pnl(
         trade.futures_entry_price, current_futures,
