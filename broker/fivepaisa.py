@@ -267,7 +267,7 @@ _option_cache = {}      # option instruments by (stock, expiry_str)
 
 
 def _load_raw_scrip_master():
-    """Download and cache full scrip master CSV with all columns."""
+    """Download scrip master CSV, keeping only NSE derivative options to save memory."""
     global _raw_scrip_cache
     if _raw_scrip_cache is not None:
         return _raw_scrip_cache
@@ -282,9 +282,11 @@ def _load_raw_scrip_master():
             values = line.split(",")
             if len(values) < len(headers):
                 continue
-            rows.append(dict(zip(headers, [v.strip() for v in values])))
+            row = dict(zip(headers, [v.strip() for v in values]))
+            if row.get("Exch") == "N" and row.get("ExchType") == "D" and row.get("CpType") in ("CE", "PE"):
+                rows.append(row)
         _raw_scrip_cache = rows
-        logger.info(f"Raw scrip master loaded: {len(rows)} rows")
+        logger.info(f"Option scrip master loaded: {len(rows)} NSE F&O option rows")
         return rows
     except Exception as e:
         logger.error(f"Failed to load raw scrip master: {str(e)}")
