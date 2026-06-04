@@ -4,7 +4,6 @@ from database import get_db
 from models.trade import Trade
 from models.settings import Settings
 from models.log import Log
-from broker.fivepaisa import cancel_order
 from utils.helpers import get_ist_now, calculate_trade_pnl
 
 router = APIRouter()
@@ -52,17 +51,12 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
     if not settings or not settings.access_token:
         return {"success": False, "error": "Broker not connected"}
 
-    errors = []
-
+    # Square off filled legs with opposite-side market orders (same as auto-close path)
+    from bot.trade_manager import _fetch_current_prices, _square_off_legs
     if not trade.is_paper_trade:
-        for order_id in [trade.futures_broker_order_id, trade.ce_broker_order_id, trade.pe_broker_order_id]:
-            if order_id:
-                result = cancel_order(settings.access_token, order_id, None, "N", "D")
-                if not result["success"]:
-                    errors.append(result["error"])
+        _square_off_legs(db, settings, trade)
 
-    # Compute P&L from current market prices before closing (same as auto-close path)
-    from bot.trade_manager import _fetch_current_prices
+    # Compute P&L from current market prices before closing
     current_prices = _fetch_current_prices(db, settings, trade)
     if current_prices:
         trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = current_prices
@@ -81,8 +75,6 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
     db.add(log)
     db.commit()
 
-    if errors:
-        return {"success": True, "warnings": errors}
     return {"success": True}
 
 

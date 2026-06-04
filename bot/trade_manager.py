@@ -636,15 +636,43 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
                      current_prices=(current_futures, current_ce, current_pe))
 
 
+def _square_off_legs(db, settings, trade: Trade):
+    """
+    Close a filled position by placing opposite-side MARKET orders (square off).
+
+    The collar legs are market orders that fill instantly, so they cannot be
+    "cancelled" — they must be reversed. Entry sides are fixed by the strategy:
+        Futures = Buy, CE = Sell, PE = Buy
+    so the exits are the opposite:
+        Futures = Sell, CE = Buy, PE = Sell
+    Same scrip code, same quantity, same product type (delivery, IsIntraday=False)
+    so the broker nets each leg to zero. Only legs that were actually opened
+    (scrip code present) are squared off, so this also handles the naked-CE trade.
+    """
+    lot_size = trade.lot_size or 1
+    square_offs = [
+        (trade.futures_scrip_code, "S", "FUT"),
+        (trade.ce_scrip_code, "B", "CE"),
+        (trade.pe_scrip_code, "S", "PE"),
+    ]
+    for scrip_code, side, leg in square_offs:
+        if not scrip_code:
+            continue
+        result = fivepaisa.place_order(
+            settings.access_token, "N", "D", scrip_code, side, 0, lot_size, False,
+            generate_remote_order_id(f"{trade.stock_name}_{leg}_EXIT")
+        )
+        if not result["success"]:
+            _save_log(db, "ERROR", f"{trade.stock_name}: failed to square off {leg} leg ({scrip_code}) - {result['error']}")
+        else:
+            _save_log(db, "INFO", f"{trade.stock_name}: squared off {leg} leg ({scrip_code}) with {side}")
+
+
 def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
-    """Cancel all legs on 5paisa and mark trade as closed in database."""
+    """Square off all open legs on 5paisa and mark trade as closed in database."""
 
     if not trade.is_paper_trade:
-        for order_id in [trade.futures_broker_order_id, trade.ce_broker_order_id, trade.pe_broker_order_id]:
-            if order_id:
-                result = fivepaisa.cancel_order(settings.access_token, order_id, None, "N", "D")
-                if not result["success"]:
-                    _save_log(db, "WARNING", f"Could not cancel order {order_id} for {trade.stock_name}: {result['error']}")
+        _square_off_legs(db, settings, trade)
 
     if current_prices:
         trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = current_prices
