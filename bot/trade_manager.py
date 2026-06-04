@@ -219,8 +219,12 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     if fut_price is not None:
         futures_price = fut_price
 
+    # Total quantity (shares) = number of lots × contract size from the scrip master.
+    # This drives both the order quantity and the rupee P&L.
+    contract_size = fivepaisa.get_lot_size(ft.stock_name, expiry) or 1
+    lot_size = (ft.lot_size or 1) * contract_size
+
     # Place all 3 orders using real numeric scrip codes
-    lot_size = ft.lot_size or 1
     futures_result = fivepaisa.place_order(
         settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
         generate_remote_order_id(ft.stock_name + "_FUT")
@@ -304,7 +308,8 @@ def _place_option_trade(db, settings, ft: FixedTrade):
         _save_log(db, "ERROR", f"{ft.stock_name}: CE option has no scrip code")
         return
 
-    lot_size = ft.lot_size or 1
+    contract_size = fivepaisa.get_lot_size(ft.stock_name, expiry) or 1
+    lot_size = (ft.lot_size or 1) * contract_size
     ce_result = fivepaisa.place_order(
         settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
         generate_remote_order_id(ft.stock_name + "_CE")
@@ -367,6 +372,10 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
     if fut_price is not None:
         futures_price = fut_price
 
+    # Total quantity (shares) = number of lots × contract size, so paper P&L is in real rupees
+    contract_size = fivepaisa.get_lot_size(ft.stock_name, expiry) or 1
+    total_qty = (ft.lot_size or 1) * contract_size
+
     # Try to fetch option chain to get real CE and PE premiums + scrip codes
     ce_premium = ce_strike  # fallback to strike value if chain unavailable
     pe_premium = None
@@ -401,7 +410,7 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
         fixed_trade_id=ft.id,
         is_paper_trade=True,
         month_type=ft.month_type,
-        lot_size=ft.lot_size or 1,
+        lot_size=total_qty,
         futures_scrip_code=futures_scrip_code,
         ce_scrip_code=ce_scrip_code,
         pe_scrip_code=pe_scrip_code,
@@ -449,12 +458,15 @@ def run_webhook_trade(stock_name: str):
         trade_type   = settings.webhook_trade_type or "collar"    # "collar" or "option"
         strike_type  = settings.webhook_strike_type or "percent"
         strike_value = settings.webhook_strike_value or 2
-        lot_size     = settings.webhook_lot_size or 1
+        num_lots     = settings.webhook_lot_size or 1
         month_type   = settings.webhook_month_type or "current"
         profit_target = settings.webhook_profit_target or 15000
         loss_limit    = settings.webhook_loss_limit or 12000
 
         expiry = _get_expiry(month_type)
+
+        # Total quantity (shares) = number of lots × contract size from the scrip master
+        lot_size = num_lots * (fivepaisa.get_lot_size(stock_name, expiry) or 1)
 
         # Get current futures price
         quote_result = fivepaisa.get_market_quote(

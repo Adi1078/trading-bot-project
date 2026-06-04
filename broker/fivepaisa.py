@@ -324,6 +324,26 @@ def get_futures_scrip_code(stock_name, expiry_date):
     return candidates[0].get("ScripCode", "")
 
 
+def get_lot_size(stock_name, expiry_date):
+    """
+    Return the contract lot size (shares per lot) for a stock's F&O contract from
+    the scrip master — e.g. INFY = 400. Returns an int, or None if not found.
+    Used to convert the user's number-of-lots into a real share quantity. Works
+    for every NSE F&O stock (the LotSize is per-instrument in the scrip master).
+    """
+    rows = _load_raw_scrip_master()
+    year_month = expiry_date.strftime("%Y-%m")
+    for row in rows:
+        if (row.get("SymbolRoot", "").upper() == stock_name.upper()
+                and row.get("ScripType") == "XX"
+                and row.get("Expiry", "").startswith(year_month)):
+            try:
+                return int(row.get("LotSize", 0)) or None
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
 def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     """
     Build option chain from scrip master + MarketSnapshot.
