@@ -219,4 +219,5 @@ function refreshAll() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 refreshAll();
-setInterval(refreshAll, 60000);
+setInterval(refreshAll, 60000);        // full refresh every minute
+setInterval(loadLiveTrades, 10000);    // live P&L refresh every 10 seconds
