@@ -45,6 +45,19 @@ def _extract_ce(option_chain):
     return next((o for o in option_chain if o.get("CPType") == "CE"), None)
 
 
+def _fetch_futures_price(settings, futures_scrip_code):
+    """Return the live futures contract price (LTP) for entry recording, or None."""
+    if not futures_scrip_code:
+        return None
+    q = fivepaisa.get_market_quote(
+        settings.access_token,
+        [{"exchange": "N", "exchange_type": "D", "scrip_code": futures_scrip_code}]
+    )
+    if q["success"] and q.get("quotes"):
+        return q["quotes"][0]["LastRate"]
+    return None
+
+
 def _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size):
     """
     Square off legs that were already placed when a later leg of a collar fails.
@@ -201,6 +214,11 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         _save_log(db, "ERROR", f"{ft.stock_name}: futures contract not found in scrip master for expiry {expiry}")
         return
 
+    # Record the actual futures contract price for entry (matches what the monitor reads)
+    fut_price = _fetch_futures_price(settings, futures_scrip_code)
+    if fut_price is not None:
+        futures_price = fut_price
+
     # Place all 3 orders using real numeric scrip codes
     lot_size = ft.lot_size or 1
     futures_result = fivepaisa.place_order(
@@ -342,9 +360,18 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
     ce_strike = calculate_ce_strike(futures_price, ft.strike_type, ft.strike_value, ft.stock_name)
     expiry = _get_expiry(ft.month_type)
 
-    # Try to fetch option chain to get real CE and PE premiums
+    # Resolve real scrip codes so the monitor can track live P&L on the paper trade
+    futures_scrip_code = fivepaisa.get_futures_scrip_code(ft.stock_name, expiry)
+    # Record the actual futures contract price as the entry (matches what the monitor reads)
+    fut_price = _fetch_futures_price(settings, futures_scrip_code)
+    if fut_price is not None:
+        futures_price = fut_price
+
+    # Try to fetch option chain to get real CE and PE premiums + scrip codes
     ce_premium = ce_strike  # fallback to strike value if chain unavailable
     pe_premium = None
+    ce_scrip_code = None
+    pe_scrip_code = None
     chain_result = fivepaisa.get_option_chain(settings.access_token, ft.stock_name, expiry, ce_strike)
     if chain_result["success"]:
         option_chain = chain_result["option_chain"]
@@ -352,6 +379,7 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
         if ce_option:
             ce_strike = ce_option.get("StrikeRate", ce_strike)  # actual exchange strike
             ce_premium = ce_option.get("LastRate", ce_strike)
+            ce_scrip_code = str(ce_option.get("Scripcode", "")) or None
 
         pe_options = [
             {"strike": o["StrikeRate"], "premium": o["LastRate"], "type": "PE"}
@@ -360,6 +388,12 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
         pe_strike, pe_prem = find_pe_strike(pe_options, ce_premium)
         if pe_strike is not None:
             pe_premium = pe_prem
+            pe_option = next(
+                (o for o in option_chain if o.get("StrikeRate") == pe_strike and o.get("CPType") == "PE"),
+                None
+            )
+            if pe_option:
+                pe_scrip_code = str(pe_option.get("Scripcode", "")) or None
 
     trade = Trade(
         stock_name=ft.stock_name,
@@ -368,6 +402,9 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
         is_paper_trade=True,
         month_type=ft.month_type,
         lot_size=ft.lot_size or 1,
+        futures_scrip_code=futures_scrip_code,
+        ce_scrip_code=ce_scrip_code,
+        pe_scrip_code=pe_scrip_code,
         futures_entry_price=futures_price,
         ce_entry_price=ce_premium,
         pe_entry_price=pe_premium,
@@ -510,6 +547,11 @@ def run_webhook_trade(stock_name: str):
             _save_log(db, "ERROR", f"Webhook {stock_name}: futures contract not found in scrip master for expiry {expiry}")
             return
 
+        # Record the actual futures contract price for entry (matches what the monitor reads)
+        fut_price = _fetch_futures_price(settings, futures_scrip_code)
+        if fut_price is not None:
+            futures_price = fut_price
+
         futures_result = fivepaisa.place_order(
             settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
             generate_remote_order_id(stock_name + "_FUT")
@@ -597,19 +639,11 @@ def monitor_open_trades():
 
 
 def _fetch_current_prices(db, settings, trade: Trade):
-    """Fetch current prices for all legs. Returns tuple (futures, ce, pe) or None."""
-    if trade.is_paper_trade:
-        watchlist_stock = db.query(Watchlist).filter(Watchlist.stock_name.ilike(trade.stock_name)).first()
-        if not watchlist_stock:
-            return None
-        quote_result = fivepaisa.get_market_quote(
-            settings.access_token,
-            [{"exchange": "N", "exchange_type": "C", "scrip_code": watchlist_stock.scrip_code}]
-        )
-        if quote_result["success"] and quote_result["quotes"]:
-            return (quote_result["quotes"][0]["LastRate"], trade.ce_entry_price, trade.pe_entry_price)
-        return None
-
+    """
+    Fetch current live prices for all legs by their scrip codes. Returns
+    (futures, ce, pe) or None. Works for both real and paper trades, since paper
+    trades now also store the real leg scrip codes.
+    """
     scrip_list = [
         {"exchange": "N", "exchange_type": "D", "scrip_code": code}
         for code in [trade.futures_scrip_code, trade.ce_scrip_code, trade.pe_scrip_code]
@@ -646,11 +680,8 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
         _close_trade(db, settings, trade, reason="time", current_prices=current_prices)
         return
 
-    # Paper trades: no real-time P&L monitoring
-    if trade.is_paper_trade:
-        return
-
-    # Get current prices for all legs
+    # Get current prices for all legs (paper trades are tracked the same way —
+    # _close_trade simply won't place real square-off orders for them).
     scrip_list = [
         {"exchange": "N", "exchange_type": "D", "scrip_code": code}
         for code in [trade.futures_scrip_code, trade.ce_scrip_code, trade.pe_scrip_code]

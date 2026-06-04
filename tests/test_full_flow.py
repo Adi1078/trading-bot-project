@@ -222,6 +222,8 @@ def test_paper_trade_records_without_placing_orders(mock_broker):
     """is_trade=False → paper trade row saved, zero broker orders sent."""
     add(make_settings(), make_watchlist(), make_fixed_trade(is_trade=False))
     mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
         trade_manager.run_fixed_trades()
