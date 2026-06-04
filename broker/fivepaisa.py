@@ -193,13 +193,22 @@ def get_positions(access_token, client_code):
         return {"success": False, "error": str(e)}
 
 
-def get_order_status(access_token, remote_order_id):
-    """Check the status of a placed order using our RemoteOrderID."""
+def get_order_status(access_token, client_code, exchange, remote_order_id):
+    """
+    Check the status of a placed order using our RemoteOrderID (V2 API).
+    Returns the list of matching order detail records (OrdStatusResLst); each has
+    an "Status" field like "Fully Executed", "Pending", "Rejected by Exch", etc.
+    """
     app_key, _, _, _, _ = _creds()
-    url = f"{BASE_URL}/V1/OrderStatus"
+    url = f"{BASE_URL}/V2/OrderStatus"
     payload = {
         "head": {"key": app_key},
-        "body": {"RemoteOrderID": remote_order_id}
+        "body": {
+            "ClientCode": client_code,
+            "OrdStatusReqList": [
+                {"Exch": exchange, "RemoteOrderID": remote_order_id}
+            ]
+        }
     }
     try:
         response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
@@ -207,7 +216,7 @@ def get_order_status(access_token, remote_order_id):
         data = response.json()
 
         if _head_ok(data):
-            return {"success": True, "status": data["body"]}
+            return {"success": True, "orders": data.get("body", {}).get("OrdStatusResLst", [])}
 
         logger.error(f"get_order_status failed for {remote_order_id}: {_head_error(data)}")
         return {"success": False, "error": _head_error(data)}

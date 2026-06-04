@@ -45,6 +45,25 @@ def _extract_ce(option_chain):
     return next((o for o in option_chain if o.get("CPType") == "CE"), None)
 
 
+def _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size):
+    """
+    Square off legs that were already placed when a later leg of a collar fails.
+    A half-built collar is an unhedged position with open risk, so if we can't
+    complete all three legs we reverse whatever we did place.
+    placed_legs: list of (scrip_code, entry_side, leg_name); we send the opposite side.
+    """
+    opposite = {"B": "S", "S": "B"}
+    for scrip_code, entry_side, leg in placed_legs:
+        result = fivepaisa.place_order(
+            settings.access_token, "N", "D", scrip_code, opposite[entry_side], 0, lot_size, False,
+            generate_remote_order_id(f"{stock_name}_{leg}_UNWIND")
+        )
+        if not result["success"]:
+            _save_log(db, "ERROR", f"{stock_name}: CRITICAL — could not unwind {leg} leg ({scrip_code}) after partial collar - {result['error']}. Check position manually!")
+        else:
+            _save_log(db, "WARNING", f"{stock_name}: unwound {leg} leg ({scrip_code}) after partial collar failure")
+
+
 # ─── Fixed Trades (Number 3) ───────────────────────────────────────────────────
 
 def run_fixed_trades():
@@ -185,6 +204,7 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     if not futures_result["success"]:
         _save_log(db, "ERROR", f"{ft.stock_name}: futures order failed - {futures_result['error']}")
         return
+    placed_legs = [(watchlist_stock.scrip_code, "B", "FUT")]
 
     ce_result = fivepaisa.place_order(
         settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
@@ -192,7 +212,9 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     )
     if not ce_result["success"]:
         _save_log(db, "ERROR", f"{ft.stock_name}: CE sell order failed - {ce_result['error']}")
+        _unwind_placed_legs(db, settings, ft.stock_name, placed_legs, lot_size)
         return
+    placed_legs.append((ce_scrip_code, "S", "CE"))
 
     pe_result = fivepaisa.place_order(
         settings.access_token, "N", "D", pe_scrip_code, "B", 0, lot_size, False,
@@ -200,6 +222,7 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     )
     if not pe_result["success"]:
         _save_log(db, "ERROR", f"{ft.stock_name}: PE buy order failed - {pe_result['error']}")
+        _unwind_placed_legs(db, settings, ft.stock_name, placed_legs, lot_size)
         return
 
     # Step 9: Save trade to database
@@ -491,10 +514,22 @@ def run_webhook_trade(stock_name: str):
 
         if not all([futures_result["success"], ce_result["success"], pe_result["success"]]):
             errors = []
-            if not futures_result["success"]: errors.append(f"Futures: {futures_result['error']}")
-            if not ce_result["success"]: errors.append(f"CE: {ce_result['error']}")
-            if not pe_result["success"]: errors.append(f"PE: {pe_result['error']}")
+            placed_legs = []
+            if futures_result["success"]:
+                placed_legs.append((watchlist_stock.scrip_code, "B", "FUT"))
+            else:
+                errors.append(f"Futures: {futures_result['error']}")
+            if ce_result["success"]:
+                placed_legs.append((ce_scrip_code, "S", "CE"))
+            else:
+                errors.append(f"CE: {ce_result['error']}")
+            if pe_result["success"]:
+                placed_legs.append((pe_scrip_code, "B", "PE"))
+            else:
+                errors.append(f"PE: {pe_result['error']}")
             _save_log(db, "ERROR", f"Webhook {stock_name}: order(s) failed — {'; '.join(errors)}")
+            if placed_legs:
+                _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size)
             return
 
         trade = Trade(
