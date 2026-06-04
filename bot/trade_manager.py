@@ -195,16 +195,22 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         _save_log(db, "ERROR", f"{ft.stock_name}: PE option has no scrip code in chain response")
         return
 
-    # Step 8: Place all 3 orders using real numeric scrip codes
+    # Step 8: Resolve the real futures contract scrip code (not the equity code)
+    futures_scrip_code = fivepaisa.get_futures_scrip_code(ft.stock_name, expiry)
+    if not futures_scrip_code:
+        _save_log(db, "ERROR", f"{ft.stock_name}: futures contract not found in scrip master for expiry {expiry}")
+        return
+
+    # Place all 3 orders using real numeric scrip codes
     lot_size = ft.lot_size or 1
     futures_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", watchlist_stock.scrip_code, "B", 0, lot_size, False,
+        settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
         generate_remote_order_id(ft.stock_name + "_FUT")
     )
     if not futures_result["success"]:
         _save_log(db, "ERROR", f"{ft.stock_name}: futures order failed - {futures_result['error']}")
         return
-    placed_legs = [(watchlist_stock.scrip_code, "B", "FUT")]
+    placed_legs = [(futures_scrip_code, "B", "FUT")]
 
     ce_result = fivepaisa.place_order(
         settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
@@ -233,7 +239,7 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         is_paper_trade=False,
         month_type=ft.month_type,
         lot_size=lot_size,
-        futures_scrip_code=watchlist_stock.scrip_code,
+        futures_scrip_code=futures_scrip_code,
         ce_scrip_code=ce_scrip_code,
         pe_scrip_code=pe_scrip_code,
         futures_broker_order_id=str(futures_result["broker_order_id"]),
@@ -499,8 +505,13 @@ def run_webhook_trade(stock_name: str):
             _save_log(db, "ERROR", f"Webhook {stock_name}: PE option has no scrip code")
             return
 
+        futures_scrip_code = fivepaisa.get_futures_scrip_code(stock_name, expiry)
+        if not futures_scrip_code:
+            _save_log(db, "ERROR", f"Webhook {stock_name}: futures contract not found in scrip master for expiry {expiry}")
+            return
+
         futures_result = fivepaisa.place_order(
-            settings.access_token, "N", "D", watchlist_stock.scrip_code, "B", 0, lot_size, False,
+            settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
             generate_remote_order_id(stock_name + "_FUT")
         )
         ce_result = fivepaisa.place_order(
@@ -516,7 +527,7 @@ def run_webhook_trade(stock_name: str):
             errors = []
             placed_legs = []
             if futures_result["success"]:
-                placed_legs.append((watchlist_stock.scrip_code, "B", "FUT"))
+                placed_legs.append((futures_scrip_code, "B", "FUT"))
             else:
                 errors.append(f"Futures: {futures_result['error']}")
             if ce_result["success"]:
@@ -538,7 +549,7 @@ def run_webhook_trade(stock_name: str):
             is_paper_trade=False,
             month_type=month_type,
             lot_size=lot_size,
-            futures_scrip_code=watchlist_stock.scrip_code,
+            futures_scrip_code=futures_scrip_code,
             ce_scrip_code=ce_scrip_code,
             pe_scrip_code=pe_scrip_code,
             futures_broker_order_id=str(futures_result["broker_order_id"]),

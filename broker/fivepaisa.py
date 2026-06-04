@@ -276,7 +276,7 @@ _option_cache = {}      # option instruments by (stock, expiry_str)
 
 
 def _load_raw_scrip_master():
-    """Download NSE F&O scrip master from official API, keeping only CE/PE options."""
+    """Download NSE F&O scrip master from official API, keeping options and futures."""
     global _raw_scrip_cache
     if _raw_scrip_cache is not None:
         return _raw_scrip_cache
@@ -292,14 +292,36 @@ def _load_raw_scrip_master():
             if len(values) < len(headers):
                 continue
             row = dict(zip(headers, [v.strip() for v in values]))
-            if row.get("ScripType") in ("CE", "PE"):
+            # CE/PE = options, XX = futures (and other non-option F&O contracts)
+            if row.get("ScripType") in ("CE", "PE", "XX"):
                 rows.append(row)
         _raw_scrip_cache = rows
-        logger.info(f"NSE F&O option scrip master loaded: {len(rows)} CE/PE contracts")
+        logger.info(f"NSE F&O scrip master loaded: {len(rows)} option/future rows")
         return rows
     except Exception as e:
         logger.error(f"Failed to load NSE F&O scrip master: {str(e)}")
         return []
+
+
+def get_futures_scrip_code(stock_name, expiry_date):
+    """
+    Find the futures contract scrip code for a stock from the F&O scrip master.
+    Futures appear with ScripType 'XX' (no strike), keyed by underlying + expiry.
+    Returns the scrip code string, or None if not found.
+    """
+    rows = _load_raw_scrip_master()
+    year_month = expiry_date.strftime("%Y-%m")  # e.g. "2026-06"
+    candidates = [
+        row for row in rows
+        if row.get("SymbolRoot", "").upper() == stock_name.upper()
+        and row.get("ScripType") == "XX"
+        and row.get("Expiry", "").startswith(year_month)
+    ]
+    if not candidates:
+        logger.error(f"No futures contract found for {stock_name} in {year_month}")
+        return None
+    candidates.sort(key=lambda r: r.get("Expiry", ""))
+    return candidates[0].get("ScripCode", "")
 
 
 def get_option_chain(access_token, stock_name, expiry_date, strike_price):

@@ -136,6 +136,7 @@ def test_collar_trade_placed_and_saved(mock_broker):
 
     mock_broker.get_market_quote.return_value = quote_ok(1126.3)
     mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.place_order.side_effect = [order_ok(111), order_ok(222), order_ok(333)]
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
@@ -246,6 +247,7 @@ def test_webhook_trade_places_collar(mock_broker):
     mock_broker.get_market_quote.return_value = quote_ok(280.5, "500312")
     # ONGC at 280.5 + 2% = 286.11 → next 50 = 300
     mock_broker.get_option_chain.return_value = chain_ok(300)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.place_order.side_effect = [order_ok(201), order_ok(202), order_ok(203)]
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
