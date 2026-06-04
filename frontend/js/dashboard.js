@@ -101,11 +101,18 @@ async function loadLiveTrades() {
     const tbody = document.getElementById("liveTradesBody");
 
     if (!data.trades || data.trades.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="9" class="empty-state">No open trades</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="empty-state">No open trades</td></tr>`;
         return;
     }
 
-    tbody.innerHTML = data.trades.map(t => `
+    tbody.innerHTML = data.trades.map(t => {
+        let pnlCell = '<span style="color:#8b949e;">—</span>';
+        if (t.live_pnl !== null && t.live_pnl !== undefined) {
+            const cls = t.live_pnl >= 0 ? "pnl-positive" : "pnl-negative";
+            const sign = t.live_pnl >= 0 ? "+" : "";
+            pnlCell = `<span class="${cls}">${sign}₹${t.live_pnl.toFixed(2)}</span>`;
+        }
+        return `
         <tr>
             <td><b>${t.stock_name}</b></td>
             <td>${t.trade_source}</td>
@@ -113,13 +120,14 @@ async function loadLiveTrades() {
             <td>${t.futures_entry_price ? "₹" + t.futures_entry_price : "—"}</td>
             <td>${t.ce_entry_price ? "₹" + t.ce_entry_price : "—"}</td>
             <td>${t.pe_entry_price ? "₹" + t.pe_entry_price : "—"}</td>
+            <td>${pnlCell}</td>
             <td style="color:#2ecc71;">₹${t.profit_target}</td>
             <td style="color:#e74c3c;">₹${t.loss_limit}</td>
             <td>
                 <button class="btn btn-danger btn-sm" onclick="closeTrade(${t.id}, '${t.stock_name}')">Close</button>
             </td>
-        </tr>
-    `).join("");
+        </tr>`;
+    }).join("");
 }
 
 async function closeTrade(tradeId, stockName) {

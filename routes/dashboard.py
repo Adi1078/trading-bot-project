@@ -25,9 +25,53 @@ def get_total_pnl(db: Session = Depends(get_db)):
 
 @router.get("/live-trades")
 def get_live_trades(db: Session = Depends(get_db)):
-    """Get all currently open trades."""
+    """Get all currently open trades, each with its live (running) P&L."""
     trades = db.query(Trade).filter(Trade.status == "open").order_by(Trade.placed_at.desc()).all()
-    return {"trades": [_trade_to_dict(t) for t in trades]}
+    pnl_map = _compute_live_pnl(db, trades)
+    return {"trades": [_trade_to_dict(t, pnl_map.get(t.id)) for t in trades]}
+
+
+def _compute_live_pnl(db, trades):
+    """
+    Compute the current running P&L for each open trade using one batched
+    market-quote call for all legs. Returns {trade_id: pnl}. Empty if the broker
+    is not connected or prices are unavailable.
+    """
+    pnl_map = {}
+    if not trades:
+        return pnl_map
+
+    settings = db.query(Settings).first()
+    if not settings or not settings.access_token:
+        return pnl_map
+
+    # Gather every distinct leg scrip code across all open trades into one request
+    scrip_codes = set()
+    for t in trades:
+        for code in [t.futures_scrip_code, t.ce_scrip_code, t.pe_scrip_code]:
+            if code:
+                scrip_codes.add(str(code))
+    if not scrip_codes:
+        return pnl_map
+
+    from broker.fivepaisa import get_market_quote
+    scrip_list = [{"exchange": "N", "exchange_type": "D", "scrip_code": c} for c in scrip_codes]
+    result = get_market_quote(settings.access_token, scrip_list)
+    if not result["success"]:
+        return pnl_map
+
+    prices = {str(q["ScripCode"]): q["LastRate"] for q in result["quotes"]}
+    for t in trades:
+        cur_fut = prices.get(str(t.futures_scrip_code), t.futures_entry_price)
+        cur_ce = prices.get(str(t.ce_scrip_code), t.ce_entry_price)
+        cur_pe = prices.get(str(t.pe_scrip_code), t.pe_entry_price)
+        pnl_map[t.id] = calculate_trade_pnl(
+            t.futures_entry_price, cur_fut,
+            t.ce_entry_price, cur_ce,
+            t.pe_entry_price, cur_pe,
+            lot_size=t.lot_size or 1
+        )
+    return pnl_map
 
 
 @router.get("/trade-history")
@@ -124,7 +168,7 @@ def get_trading_status(db: Session = Depends(get_db)):
     return {"is_trading": settings.is_trading if settings else False}
 
 
-def _trade_to_dict(trade: Trade):
+def _trade_to_dict(trade: Trade, live_pnl=None):
     return {
         "id": trade.id,
         "stock_name": trade.stock_name,
@@ -142,6 +186,7 @@ def _trade_to_dict(trade: Trade):
         "status": trade.status,
         "close_reason": trade.close_reason,
         "pnl": trade.pnl,
+        "live_pnl": live_pnl,
         "placed_at": str(trade.placed_at) if trade.placed_at else None,
         "closed_at": str(trade.closed_at) if trade.closed_at else None
     }
