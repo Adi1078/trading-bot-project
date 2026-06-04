@@ -47,18 +47,19 @@ def sync_positions():
 
         live_positions = result.get("positions", [])
 
-        # Build a set of broker order IDs that are still open on 5paisa
-        live_order_ids = set()
+        # The Net Position response identifies positions by ScripCode + NetQty
+        # (there is no OrderID). Build the set of scrip codes that still have an
+        # open net quantity on 5paisa.
+        open_scrip_codes = set()
         for position in live_positions:
-            order_id = str(position.get("OrderID", ""))
+            scrip_code = str(position.get("ScripCode", ""))
             net_qty = position.get("NetQty", 0)
-            # Only consider positions that still have quantity (not yet squared off)
-            if order_id and net_qty != 0:
-                live_order_ids.add(order_id)
+            if scrip_code and net_qty != 0:
+                open_scrip_codes.add(scrip_code)
 
         # Check each of our open trades
         for trade in our_open_trades:
-            if _is_closed_on_broker(trade, live_order_ids):
+            if _is_closed_on_broker(trade, open_scrip_codes):
                 trade.status = "closed"
                 trade.close_reason = "manual"
                 trade.closed_at = get_ist_now()
@@ -70,22 +71,24 @@ def sync_positions():
         db.close()
 
 
-def _is_closed_on_broker(trade: Trade, live_order_ids: set) -> bool:
+def _is_closed_on_broker(trade: Trade, open_scrip_codes: set) -> bool:
     """
     Check if all legs of a trade are no longer active on 5paisa.
-    Returns True only if ALL legs that were placed are now gone from 5paisa.
+    A leg is identified by its scrip code; it is still open if that scrip code
+    has a non-zero net quantity. Returns True only if NONE of the trade's legs
+    still have an open position (i.e. the client squared everything off manually).
     """
-    placed_order_ids = [
-        oid for oid in [
-            trade.futures_broker_order_id,
-            trade.ce_broker_order_id,
-            trade.pe_broker_order_id
+    leg_scrip_codes = [
+        str(code) for code in [
+            trade.futures_scrip_code,
+            trade.ce_scrip_code,
+            trade.pe_scrip_code
         ]
-        if oid is not None
+        if code is not None
     ]
 
-    if not placed_order_ids:
+    if not leg_scrip_codes:
         return False
 
-    # If none of our placed orders are in the live positions anymore, trade is closed
-    return not any(oid in live_order_ids for oid in placed_order_ids)
+    # If none of our legs still hold an open net position, the trade is closed
+    return not any(code in open_scrip_codes for code in leg_scrip_codes)
