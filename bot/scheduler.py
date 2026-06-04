@@ -85,7 +85,9 @@ def _token_reminder_sent_today():
 
 def _run_loop():
     """
-    Main scheduler loop. Runs every 60 seconds.
+    Main scheduler loop. Runs every 10 seconds during market hours so open trades
+    are checked for target/stop-loss promptly (≤10s lag instead of ~60s). 10s sits
+    just above 5paisa's 5-second price cache, so every check gets fresh data.
     Uses the database to track what ran today — no in-memory flags,
     so restarts and time changes work correctly.
     """
@@ -129,7 +131,7 @@ def _run_loop():
                 except Exception as e:
                     _save_log("ERROR", f"Scheduler: run_fixed_trades failed - {str(e)}")
 
-            # ── Monitor open trades every minute ──
+            # ── Monitor open trades every loop (~10s) ──
             try:
                 from bot.trade_manager import monitor_open_trades
                 monitor_open_trades()
@@ -157,7 +159,7 @@ def _run_loop():
         except Exception as e:
             _save_log("ERROR", f"Scheduler loop error: {str(e)}")
 
-        time.sleep(60)
+        time.sleep(10)
 
     _save_log("INFO", "Scheduler stopped")
 
