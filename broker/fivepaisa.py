@@ -117,15 +117,23 @@ def place_order(access_token, exchange, exchange_type, scrip_code, order_type,
         response.raise_for_status()
         data = response.json()
 
-        if data["body"]["Status"] == 0:
+        # body is null when the request is rejected at the head level (e.g. invalid app key)
+        body = data.get("body")
+        if not body:
+            head_desc = data.get("head", {}).get("statusDescription", "no body in response")
+            logger.error(f"place_order failed for scrip {scrip_code}: {head_desc}")
+            return {"success": False, "error": head_desc}
+
+        if body.get("Status") == 0:
             return {
                 "success": True,
-                "broker_order_id": data["body"]["BrokerOrderID"],
-                "message": data["body"]["Message"]
+                "broker_order_id": body.get("BrokerOrderID"),
+                "message": body.get("Message", "")
             }
 
-        logger.error(f"place_order failed for scrip {scrip_code}: {data['body']['Message']}")
-        return {"success": False, "error": data["body"]["Message"]}
+        error_msg = body.get("Message", "Order failed")
+        logger.error(f"place_order failed for scrip {scrip_code}: {error_msg}")
+        return {"success": False, "error": error_msg}
 
     except Exception as e:
         logger.error(f"place_order exception for scrip {scrip_code}: {str(e)}")
