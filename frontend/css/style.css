@@ -199,6 +199,18 @@ thead th {
     letter-spacing: 0.5px;
 }
 
+/* Scrollable table body: shows ~8 rows, scrolls within itself, header stays fixed */
+.table-scroll {
+    max-height: 380px;
+    overflow-y: auto;
+}
+
+.table-scroll thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
 tbody tr {
     border-bottom: 1px solid #21262d;
     transition: background 0.15s;

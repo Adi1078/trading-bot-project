@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trading Bot — Dashboard</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=2">
+    <link rel="stylesheet" href="/static/css/style.css?v=3">
 </head>
 <body>
 
@@ -85,22 +85,24 @@
             <button class="btn btn-secondary btn-sm" onclick="loadTradeHistory()">Refresh</button>
         </div>
         <div class="card-body">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Stock</th>
-                        <th>Source</th>
-                        <th>Type</th>
-                        <th>Close Reason</th>
-                        <th>P&L</th>
-                        <th>Placed At</th>
-                        <th>Closed At</th>
-                    </tr>
-                </thead>
-                <tbody id="tradeHistoryBody">
-                    <tr><td colspan="7" class="empty-state">No closed trades</td></tr>
-                </tbody>
-            </table>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Stock</th>
+                            <th>Source</th>
+                            <th>Type</th>
+                            <th>Close Reason</th>
+                            <th>P&L</th>
+                            <th>Placed At</th>
+                            <th>Closed At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradeHistoryBody">
+                        <tr><td colspan="7" class="empty-state">No closed trades</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 
