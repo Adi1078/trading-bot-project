@@ -86,24 +86,36 @@ def search_stocks(query: str):
 
     query_lower = query.lower()
 
-    # Cash segment only (ExchType "C") — removes F&O contract rows that share the
-    # same name, so the correct spot/equity scrip code is suggested (e.g. CHOLAFIN
-    # 685, not a derivative code). Indices stay searchable (only F&O rows dropped).
-    cash = [
+    # Cash equity series only (ExchType "C", Series "EQ"). In 5paisa's data this
+    # keeps stocks AND indices (NIFTY/BANKNIFTY are tagged EQ) while dropping bonds/
+    # NCDs (series NI/NP/NQ/...) and F&O contract rows.
+    eq = [
         inst for inst in result["instruments"]
-        if inst.get("ExchType") == "C"
+        if inst.get("ExchType") == "C" and inst.get("Series") == "EQ"
         and (query_lower in inst.get("Symbol", "").lower()
              or query_lower in inst.get("FullName", "").lower())
     ]
 
-    # De-duplicate by symbol, preferring the EQ series when a symbol has several rows.
+    # De-duplicate by symbol (keep first occurrence).
     by_symbol = {}
-    for inst in cash:
+    for inst in eq:
         name = inst.get("Symbol", "")
-        if name not in by_symbol or inst.get("Series") == "EQ":
+        if name not in by_symbol:
             by_symbol[name] = inst
 
-    matched = list(by_symbol.values())[:20]
+    # Rank by relevance so an exact/prefix symbol match (e.g. "NIFTY") sits at the
+    # top instead of being buried under ETFs that merely contain the text.
+    def _rank(inst):
+        sym = inst.get("Symbol", "").lower()
+        if sym == query_lower:
+            return 0
+        if sym.startswith(query_lower):
+            return 1
+        if query_lower in sym:
+            return 2
+        return 3
+
+    matched = sorted(by_symbol.values(), key=_rank)[:20]
     return {"success": True, "instruments": matched}
 
 

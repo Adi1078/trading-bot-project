@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>iAction Pulse — Admin Panel</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=4">
+    <link rel="stylesheet" href="/static/css/style.css?v=5">
 </head>
 <body>
 
@@ -143,66 +143,60 @@
             <!-- Inline Add / Edit form (stays visible above the table) -->
             <div class="card">
                 <div class="card-header"><h3 id="ftFormTitle">Add Fixed Trade</h3></div>
-                <div class="card-body" style="padding:20px;">
+                <div class="card-body" style="padding:16px 20px;">
                     <input type="hidden" id="editTradeId">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Stock Name</label>
-                            <input type="text" class="form-control" id="ftStockName" placeholder="e.g. INFY">
+                    <div class="ft-add-row">
+                        <div class="ft-field" style="flex:1 1 150px;">
+                            <label>Stock</label>
+                            <div class="autocomplete-wrapper">
+                                <input type="text" class="form-control" id="ftStockName" placeholder="Type & pick"
+                                    oninput="searchFixedTradeStocks()" autocomplete="off">
+                                <div class="autocomplete-list" id="ftStockAutocomplete"></div>
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label>Scrip Code</label>
-                            <input type="text" class="form-control" id="ftScripCode" placeholder="Optional">
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
+                        <div class="ft-field">
                             <label>Strike Type</label>
                             <select class="form-control" id="ftStrikeType">
-                                <option value="fixed">Fixed (exact strike)</option>
-                                <option value="percent">Percent (% upside)</option>
+                                <option value="fixed">Fixed</option>
+                                <option value="percent">Percent</option>
                             </select>
                         </div>
-                        <div class="form-group">
+                        <div class="ft-field">
                             <label>CE Sell Strike Value</label>
-                            <input type="number" class="form-control" id="ftStrikeValue" placeholder="e.g. 1150 or 2">
+                            <input type="number" class="form-control" id="ftStrikeValue" placeholder="1150 or 2">
                         </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
+                        <div class="ft-field">
+                            <label>Lot Size</label>
+                            <input type="number" class="form-control" id="ftLotSize" placeholder="1" min="1" value="1">
+                        </div>
+                        <div class="ft-field">
                             <label>Profit Target (₹)</label>
-                            <input type="number" class="form-control" id="ftProfit" placeholder="e.g. 10000">
+                            <input type="number" class="form-control" id="ftProfit" placeholder="10000">
                         </div>
-                        <div class="form-group">
+                        <div class="ft-field">
                             <label>Loss Limit (₹)</label>
-                            <input type="number" class="form-control" id="ftLoss" placeholder="e.g. 12000">
+                            <input type="number" class="form-control" id="ftLoss" placeholder="12000">
                         </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Month Type</label>
+                        <div class="ft-field">
+                            <label>Month</label>
                             <select class="form-control" id="ftMonthType">
-                                <option value="current">Current Month</option>
-                                <option value="next">Next Month</option>
-                                <option value="option">Option (CE Sell Only)</option>
+                                <option value="current">Current</option>
+                                <option value="next">Next</option>
+                                <option value="option">Option</option>
                             </select>
                         </div>
-                        <div class="form-group">
-                            <label>Lot Size <span style="color:#8b949e;font-size:11px;">(e.g. 300 for INFY)</span></label>
-                            <input type="number" class="form-control" id="ftLotSize" placeholder="e.g. 300" min="1" value="1">
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
+                        <div class="ft-field">
                             <label>Trade</label>
                             <select class="form-control" id="ftIsTrade">
-                                <option value="true">Yes (Live Trade)</option>
-                                <option value="false">No (Paper Trade)</option>
+                                <option value="true">Yes (Live)</option>
+                                <option value="false">No (Paper)</option>
                             </select>
                         </div>
+                        <div class="ft-field ft-actions">
+                            <button class="btn btn-primary" id="ftSaveBtn" onclick="saveFixedTrade()">Add</button>
+                            <button class="btn btn-secondary" onclick="clearFixedTradeForm()">Clear</button>
+                        </div>
                     </div>
-                    <button class="btn btn-primary" id="ftSaveBtn" onclick="saveFixedTrade()">Add Trade</button>
-                    <button class="btn btn-secondary" onclick="clearFixedTradeForm()">Clear</button>
                 </div>
             </div>
 
@@ -486,6 +480,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=5"></script>
+<script src="/static/js/admin.js?v=6"></script>
 </body>
 </html>

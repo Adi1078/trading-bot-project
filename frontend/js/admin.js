@@ -260,16 +260,47 @@ async function removeStock(stockId, stockName) {
     }
 }
 
-// Close autocomplete when clicking outside
+// Close any open autocomplete dropdown when clicking outside it
 document.addEventListener("click", (e) => {
     if (!e.target.closest(".autocomplete-wrapper")) {
-        document.getElementById("stockAutocomplete").classList.remove("show");
+        document.querySelectorAll(".autocomplete-list").forEach(el => el.classList.remove("show"));
     }
 });
 
 // ── Fixed Trades ──────────────────────────────────────────────────────────────
 
+// Watchlist names cached for the Stock suggestion dropdown (typo-proof selection).
+let fixedTradeWatchlist = [];
+
+async function loadFixedTradeStockOptions() {
+    const data = await api("/api/watchlist/");
+    fixedTradeWatchlist = (data.stocks || []).map(s => s.stock_name);
+}
+
+function searchFixedTradeStocks() {
+    const list = document.getElementById("ftStockAutocomplete");
+    const q = document.getElementById("ftStockName").value.trim().toUpperCase();
+    if (!q) { list.classList.remove("show"); return; }
+
+    const matches = fixedTradeWatchlist.filter(n => n.toUpperCase().includes(q)).slice(0, 10);
+    if (!matches.length) {
+        list.innerHTML = `<div class="autocomplete-item" style="color:#8b949e;">Not in watchlist — add it there first</div>`;
+        list.classList.add("show");
+        return;
+    }
+    list.innerHTML = matches.map(n =>
+        `<div class="autocomplete-item" onclick="selectFixedTradeStock('${n}')"><b>${n}</b></div>`
+    ).join("");
+    list.classList.add("show");
+}
+
+function selectFixedTradeStock(name) {
+    document.getElementById("ftStockName").value = name;
+    document.getElementById("ftStockAutocomplete").classList.remove("show");
+}
+
 async function loadFixedTrades() {
+    loadFixedTradeStockOptions();   // refresh the Stock suggestion list
     const data = await api("/api/fixed-trades/");
     const tbody = document.getElementById("fixedTradesBody");
 
@@ -307,7 +338,6 @@ function clearFixedTradeForm() {
     document.getElementById("ftSaveBtn").textContent = "Add Trade";
     document.getElementById("editTradeId").value = "";
     document.getElementById("ftStockName").value = "";
-    document.getElementById("ftScripCode").value = "";
     document.getElementById("ftStrikeType").value = "fixed";
     document.getElementById("ftStrikeValue").value = "";
     document.getElementById("ftProfit").value = "";
@@ -323,7 +353,6 @@ function editFixedTrade(trade) {
     document.getElementById("ftSaveBtn").textContent = "Update Trade";
     document.getElementById("editTradeId").value = trade.id;
     document.getElementById("ftStockName").value = trade.stock_name;
-    document.getElementById("ftScripCode").value = trade.scrip_code || "";
     document.getElementById("ftStrikeType").value = trade.strike_type;
     document.getElementById("ftStrikeValue").value = trade.strike_value;
     document.getElementById("ftProfit").value = trade.profit_target;
@@ -338,7 +367,7 @@ async function saveFixedTrade() {
     const editId = document.getElementById("editTradeId").value;
     const body = {
         stock_name: document.getElementById("ftStockName").value.trim().toUpperCase(),
-        scrip_code: document.getElementById("ftScripCode").value.trim() || null,
+        scrip_code: null,
         strike_type: document.getElementById("ftStrikeType").value,
         strike_value: parseFloat(document.getElementById("ftStrikeValue").value),
         profit_target: parseFloat(document.getElementById("ftProfit").value),

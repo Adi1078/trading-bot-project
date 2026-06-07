@@ -78,6 +78,32 @@ body {
 .btn-nav       { background: #1f6feb; color: #fff; }   /* navigation buttons (Admin Panel / Dashboard) */
 .btn-nav:hover { background: #388bfd; }
 
+/* Horizontal Add/Edit row for Fixed Trades (mirrors the table columns) */
+.ft-add-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+}
+.ft-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 110px;
+    min-width: 100px;
+}
+.ft-field label {
+    font-size: 11px;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+.ft-field.ft-actions {
+    flex: 0 0 auto;
+    flex-direction: row;
+    gap: 8px;
+}
+
 /* Stat group headings on the dashboard (Real Trades / Paper Trades) */
 .stats-group-title {
     font-size: 13px;
