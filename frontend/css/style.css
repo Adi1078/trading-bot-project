@@ -78,30 +78,30 @@ body {
 .btn-nav       { background: #1f6feb; color: #fff; }   /* navigation buttons (Admin Panel / Dashboard) */
 .btn-nav:hover { background: #388bfd; }
 
-/* Horizontal Add/Edit row for Fixed Trades (mirrors the table columns) */
-.ft-add-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: flex-end;
+/* Even grid Add/Edit form for Fixed Trades — equal-width columns that wrap tidily */
+.ft-add-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 14px;
+    align-items: end;
 }
 .ft-field {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    flex: 1 1 110px;
-    min-width: 100px;
+    min-width: 0;          /* prevents grid items from overflowing */
 }
 .ft-field label {
     font-size: 11px;
     color: #8b949e;
     text-transform: uppercase;
     letter-spacing: 0.4px;
+    white-space: nowrap;
 }
-.ft-field.ft-actions {
-    flex: 0 0 auto;
-    flex-direction: row;
+.ft-add-actions {
+    display: flex;
     gap: 8px;
+    margin-top: 14px;
 }
 
 /* Stat group headings on the dashboard (Real Trades / Paper Trades) */
@@ -401,6 +401,9 @@ tbody td {
 }
 
 .autocomplete-list.show { display: block; }
+
+/* Cards holding a search dropdown must not clip it (overrides .card overflow:hidden) */
+.card.card-overflow { overflow: visible; }
 
 .autocomplete-item {
     padding: 9px 12px;

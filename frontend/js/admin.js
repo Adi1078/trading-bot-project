@@ -317,7 +317,7 @@ async function loadFixedTrades() {
             <td>${t.lot_size || 1}</td>
             <td style="color:#2ecc71;">₹${t.profit_target}</td>
             <td style="color:#e74c3c;">₹${t.loss_limit}</td>
-            <td>${t.month_type}</td>
+            <td>${t.month_type === "option" ? "Naked CE Sell" : t.month_type}</td>
             <td>
                 <span class="badge ${t.is_trade ? 'badge-open' : 'badge-paper'}">
                     ${t.is_trade ? "Yes" : "Paper"}
@@ -332,12 +332,22 @@ async function loadFixedTrades() {
     `).join("");
 }
 
+// When "Naked CE Sell" is chosen, Month is irrelevant (naked CE uses current
+// expiry), so disable it to avoid confusion.
+function onFtTradeTypeChange() {
+    const isOption = document.getElementById("ftTradeType").value === "option";
+    const month = document.getElementById("ftMonthType");
+    month.disabled = isOption;
+    if (isOption) month.value = "current";
+}
+
 // Resets the inline Add/Edit form back to "add" mode (no API call).
 function clearFixedTradeForm() {
     document.getElementById("ftFormTitle").textContent = "Add Fixed Trade";
     document.getElementById("ftSaveBtn").textContent = "Add Trade";
     document.getElementById("editTradeId").value = "";
     document.getElementById("ftStockName").value = "";
+    document.getElementById("ftTradeType").value = "collar";
     document.getElementById("ftStrikeType").value = "fixed";
     document.getElementById("ftStrikeValue").value = "";
     document.getElementById("ftProfit").value = "";
@@ -345,6 +355,7 @@ function clearFixedTradeForm() {
     document.getElementById("ftMonthType").value = "current";
     document.getElementById("ftLotSize").value = "1";
     document.getElementById("ftIsTrade").value = "true";
+    onFtTradeTypeChange();
 }
 
 // Loads a row into the same inline form for editing (table stays visible).
@@ -357,14 +368,31 @@ function editFixedTrade(trade) {
     document.getElementById("ftStrikeValue").value = trade.strike_value;
     document.getElementById("ftProfit").value = trade.profit_target;
     document.getElementById("ftLoss").value = trade.loss_limit;
-    document.getElementById("ftMonthType").value = trade.month_type;
     document.getElementById("ftLotSize").value = trade.lot_size || 1;
     document.getElementById("ftIsTrade").value = String(trade.is_trade);
+    // Backend stores one field (month_type) that can be current/next/option.
+    // Split it back into the two UI dropdowns.
+    if (trade.month_type === "option") {
+        document.getElementById("ftTradeType").value = "option";
+        document.getElementById("ftMonthType").value = "current";
+    } else {
+        document.getElementById("ftTradeType").value = "collar";
+        document.getElementById("ftMonthType").value = trade.month_type;
+    }
+    onFtTradeTypeChange();
     document.getElementById("ftFormTitle").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 async function saveFixedTrade() {
     const editId = document.getElementById("editTradeId").value;
+
+    // The backend keeps a single month_type field that is current/next/option.
+    // Map the two UI dropdowns back into it: Naked CE Sell -> "option",
+    // otherwise the chosen month. (Backend + trading logic unchanged.)
+    const tradeType = document.getElementById("ftTradeType").value;   // "collar" | "option"
+    const month = document.getElementById("ftMonthType").value;        // "current" | "next"
+    const monthType = (tradeType === "option") ? "option" : month;
+
     const body = {
         stock_name: document.getElementById("ftStockName").value.trim().toUpperCase(),
         scrip_code: null,
@@ -372,7 +400,7 @@ async function saveFixedTrade() {
         strike_value: parseFloat(document.getElementById("ftStrikeValue").value),
         profit_target: parseFloat(document.getElementById("ftProfit").value),
         loss_limit: parseFloat(document.getElementById("ftLoss").value),
-        month_type: document.getElementById("ftMonthType").value,
+        month_type: monthType,
         lot_size: parseInt(document.getElementById("ftLotSize").value) || 1,
         is_trade: document.getElementById("ftIsTrade").value === "true"
     };

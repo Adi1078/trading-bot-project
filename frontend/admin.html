@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>iAction Pulse — Admin Panel</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=5">
+    <link rel="stylesheet" href="/static/css/style.css?v=7">
 </head>
 <body>
 
@@ -88,7 +88,7 @@
         <div class="section" id="section-watchlist">
             <div class="section-title">Watchlist (Number 2)</div>
 
-            <div class="card">
+            <div class="card card-overflow">
                 <div class="card-header"><h3>Add Stock</h3></div>
                 <div class="card-body" style="padding:20px;">
                     <div class="form-row">
@@ -141,18 +141,25 @@
             <div class="section-title">Fixed Trades (Number 3)</div>
 
             <!-- Inline Add / Edit form (stays visible above the table) -->
-            <div class="card">
+            <div class="card card-overflow">
                 <div class="card-header"><h3 id="ftFormTitle">Add Fixed Trade</h3></div>
                 <div class="card-body" style="padding:16px 20px;">
                     <input type="hidden" id="editTradeId">
-                    <div class="ft-add-row">
-                        <div class="ft-field" style="flex:1 1 150px;">
+                    <div class="ft-add-grid">
+                        <div class="ft-field">
                             <label>Stock</label>
                             <div class="autocomplete-wrapper">
                                 <input type="text" class="form-control" id="ftStockName" placeholder="Type & pick"
                                     oninput="searchFixedTradeStocks()" autocomplete="off">
                                 <div class="autocomplete-list" id="ftStockAutocomplete"></div>
                             </div>
+                        </div>
+                        <div class="ft-field">
+                            <label>Trade Type</label>
+                            <select class="form-control" id="ftTradeType" onchange="onFtTradeTypeChange()">
+                                <option value="collar">Collar</option>
+                                <option value="option">Naked CE Sell</option>
+                            </select>
                         </div>
                         <div class="ft-field">
                             <label>Strike Type</label>
@@ -180,9 +187,8 @@
                         <div class="ft-field">
                             <label>Month</label>
                             <select class="form-control" id="ftMonthType">
-                                <option value="current">Current</option>
-                                <option value="next">Next</option>
-                                <option value="option">Option</option>
+                                <option value="current">Current Month</option>
+                                <option value="next">Next Month</option>
                             </select>
                         </div>
                         <div class="ft-field">
@@ -192,10 +198,10 @@
                                 <option value="false">No (Paper)</option>
                             </select>
                         </div>
-                        <div class="ft-field ft-actions">
-                            <button class="btn btn-primary" id="ftSaveBtn" onclick="saveFixedTrade()">Add</button>
-                            <button class="btn btn-secondary" onclick="clearFixedTradeForm()">Clear</button>
-                        </div>
+                    </div>
+                    <div class="ft-add-actions">
+                        <button class="btn btn-primary" id="ftSaveBtn" onclick="saveFixedTrade()">Add Trade</button>
+                        <button class="btn btn-secondary" onclick="clearFixedTradeForm()">Clear</button>
                     </div>
                 </div>
             </div>
@@ -480,6 +486,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=6"></script>
+<script src="/static/js/admin.js?v=7"></script>
 </body>
 </html>
