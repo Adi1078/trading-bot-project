@@ -125,6 +125,10 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
 @router.post("/run-fixed-trades-now")
 def run_fixed_trades_now(db: Session = Depends(get_db)):
     """Manually trigger fixed trades right now — for testing only."""
+    from utils.exchange_calendar import is_trading_day
+    if not is_trading_day():
+        return {"success": False, "error": "Market is closed today (weekend/holiday)"}
+
     settings = db.query(Settings).first()
     if not settings or not settings.is_trading:
         return {"success": False, "error": "Turn on the Trade switch first"}

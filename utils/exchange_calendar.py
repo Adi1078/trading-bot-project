@@ -21,6 +21,19 @@ NSE_HOLIDAYS = [
 ]
 
 
+def is_trading_day(check_date=None):
+    """
+    True only on NSE trading days. Excludes weekends (Sat/Sun) and NSE holidays.
+    Defaults to today (IST) if no date is given.
+    """
+    d = check_date or datetime.now(IST).date()
+    if d.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+        return False
+    if d.strftime("%Y-%m-%d") in NSE_HOLIDAYS:
+        return False
+    return True
+
+
 def _get_last_thursday(year, month):
     last_day = calendar.monthrange(year, month)[1]
     last_date = datetime(year, month, last_day)
