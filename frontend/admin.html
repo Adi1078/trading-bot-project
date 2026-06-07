@@ -25,6 +25,7 @@
         <div class="sidebar-item" onclick="showSection(event, 'fixedTrades')">📊 Fixed Trades</div>
         <div class="sidebar-item" onclick="showSection(event, 'chartink')">🔗 Chartink</div>
         <div class="sidebar-item" onclick="showSection(event, 'reports')">📁 Reports</div>
+        <div class="sidebar-item" onclick="showSection(event, 'logs')">📜 Logs</div>
     </div>
 
     <!-- Admin Content -->
@@ -168,31 +169,26 @@
 
         <!-- Chartink Section -->
         <div class="section" id="section-chartink">
-            <div class="section-title">Chartink Webhook (Number 4)</div>
+            <div class="section-title">Chartink Screener (Number 4)</div>
 
             <div class="card">
-                <div class="card-header"><h3>Webhook URL</h3></div>
+                <div class="card-header"><h3>How it works</h3></div>
                 <div class="card-body" style="padding:20px;">
-                    <p style="color:#8b949e;margin-bottom:12px;font-size:13px;">
-                        Copy this URL into your Chartink screener alert. Chartink will POST to this URL whenever your screener fires.
-                    </p>
-                    <div style="display:flex;gap:8px;align-items:center;">
-                        <input type="text" class="form-control" id="webhookUrl" readonly
-                            style="font-family:monospace;font-size:12px;color:#58a6ff;">
-                        <button class="btn btn-secondary btn-sm" onclick="copyWebhookUrl()">Copy</button>
-                    </div>
-                    <p style="color:#8b949e;margin-top:12px;font-size:12px;">
-                        In Chartink: Alert → Webhook → paste the URL above.<br>
-                        The bot only trades stocks that are in your <b>Watchlist</b>. All others are silently skipped.
+                    <p style="color:#8b949e;font-size:13px;line-height:1.6;">
+                        The bot automatically runs the configured Chartink screeners <b>every 5 minutes</b>
+                        during market hours and reads back the matching stocks. For each stock that is also in
+                        your <b>Watchlist</b>, it places a trade using the configuration below. Stocks not in the
+                        watchlist are silently skipped, and each stock is traded at most <b>once per day</b>.<br><br>
+                        No setup is needed on Chartink — the screeners are built into the bot.
                     </p>
                 </div>
             </div>
 
             <div class="card">
-                <div class="card-header"><h3>Webhook Trade Configuration</h3></div>
+                <div class="card-header"><h3>Screener Trade Configuration</h3></div>
                 <div class="card-body" style="padding:20px;">
                     <p style="color:#8b949e;margin-bottom:16px;font-size:13px;">
-                        This single configuration applies to <b>all</b> stocks sent by Chartink — regardless of which stock it is.
+                        This single configuration applies to <b>all</b> stocks picked by the screeners — regardless of which stock it is.
                     </p>
                     <div class="form-row">
                         <div class="form-group">
@@ -244,26 +240,11 @@
                     <button class="btn btn-primary" onclick="saveWebhookSettings()">Save Configuration</button>
                 </div>
             </div>
-
-            <div class="card">
-                <div class="card-header"><h3>Test Webhook</h3></div>
-                <div class="card-body" style="padding:20px;">
-                    <p style="color:#8b949e;margin-bottom:12px;font-size:13px;">
-                        Simulate a Chartink signal for a stock already in your watchlist. Requires broker connected and Trade switch ON.
-                    </p>
-                    <div style="display:flex;gap:8px;">
-                        <input type="text" class="form-control" id="testWebhookStock"
-                            placeholder="e.g. INFY" style="max-width:200px;">
-                        <button class="btn btn-warning" onclick="testWebhook()">Fire Test Signal</button>
-                    </div>
-                    <div id="testWebhookResult" style="margin-top:12px;font-size:13px;display:none;"></div>
-                </div>
-            </div>
         </div>
 
         <!-- Reports Section -->
         <div class="section" id="section-reports">
-            <div class="section-title">Monthly Reports</div>
+            <div class="section-title">Monthly Report</div>
 
             <div class="card">
                 <div class="card-header"><h3>Generate Report</h3></div>
@@ -329,6 +310,82 @@
                             </thead>
                             <tbody id="reportTradesBody"></tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Yearly Report -->
+            <div class="section-title" style="margin-top:28px;">Yearly Report</div>
+            <div class="card">
+                <div class="card-header"><h3>Generate Yearly Report</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Year</label>
+                            <input type="number" class="form-control" id="yearlyReportYear" value="2026" min="2024" max="2030">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="generateYearlyReport()">Generate Yearly Report</button>
+                </div>
+            </div>
+
+            <div id="yearlyReportOutput" style="display:none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 id="yearlyReportTitle">Yearly Report</h3>
+                        <button class="btn btn-secondary btn-sm" onclick="downloadYearlyReport()">Download HTML</button>
+                    </div>
+                    <div class="card-body" style="padding:20px;">
+                        <div class="stats-row" style="margin-bottom:16px;">
+                            <div class="stat-card">
+                                <div class="label">Total Trades</div>
+                                <div class="value neutral" id="yTotalTrades">0</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="label">Net P&L</div>
+                                <div class="value" id="yNetPnl">₹0</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="label">Win / Loss</div>
+                                <div class="value neutral" id="yWinLoss">0 / 0</div>
+                            </div>
+                        </div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Month</th>
+                                    <th>Trades</th>
+                                    <th>Profitable</th>
+                                    <th>Losing</th>
+                                    <th>Net P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody id="yearlyBreakdownBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs Section -->
+        <div class="section" id="section-logs">
+            <div class="section-title">Logs</div>
+            <div class="card">
+                <div class="card-header">
+                    <h3>Logs</h3>
+                    <div style="display:flex;gap:8px;">
+                        <select class="form-control" id="logLevelFilter" style="width:120px;padding:5px 8px;font-size:12px;" onchange="loadLogs()">
+                            <option value="">All</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <button class="btn btn-secondary btn-sm" onclick="loadLogs()">Refresh</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="logs-container" id="logsContainer">
+                        <div class="empty-state">No logs yet</div>
                     </div>
                 </div>
             </div>
@@ -408,6 +465,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=2"></script>
+<script src="/static/js/admin.js?v=3"></script>
 </body>
 </html>

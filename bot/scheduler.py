@@ -92,6 +92,7 @@ def _run_loop():
     so restarts and time changes work correctly.
     """
     last_sync_time = None
+    last_chartink_scan = None
 
     _save_log("INFO", "Scheduler started")
 
@@ -146,6 +147,16 @@ def _run_loop():
                     last_sync_time = now
                 except Exception as e:
                     _save_log("ERROR", f"Scheduler: position sync failed - {str(e)}")
+
+            # ── Chartink screener scan every 5 minutes (runs in background so it
+            #    never blocks the monitor loop). run_chartink_cycle has its own guards. ──
+            if last_chartink_scan is None or (now - last_chartink_scan).seconds >= 300:
+                try:
+                    from bot.trade_manager import run_chartink_cycle
+                    threading.Thread(target=run_chartink_cycle, daemon=True).start()
+                    last_chartink_scan = now
+                except Exception as e:
+                    _save_log("ERROR", f"Scheduler: chartink scan failed - {str(e)}")
 
             # ── Safety check at 3:40 PM once per day ──
             if is_safety_check_time() and not _safety_check_ran_today():

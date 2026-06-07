@@ -30,6 +30,37 @@ function showSection(e, name) {
     if (name === "watchlist") loadWatchlist();
     if (name === "fixedTrades") loadFixedTrades();
     if (name === "chartink") loadChartinkSection();
+    if (name === "logs") loadLogs();
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────────────
+
+async function loadLogs() {
+    const level = document.getElementById("logLevelFilter").value;
+    const url = level ? `/api/logs/?level=${level}&limit=100` : "/api/logs/?limit=100";
+    const data = await api(url);
+    const container = document.getElementById("logsContainer");
+
+    if (!data.logs || data.logs.length === 0) {
+        container.innerHTML = `<div class="empty-state">No logs yet</div>`;
+        return;
+    }
+
+    container.innerHTML = data.logs.map(log => {
+        const badgeClass = log.level === "ERROR" ? "badge-error" : log.level === "WARNING" ? "badge-warning" : "badge-info";
+        return `
+        <div class="log-entry">
+            <span class="log-time">${formatLogDate(log.created_at)}</span>
+            <span class="badge ${badgeClass}">${log.level}</span>
+            <span class="log-msg">${log.message}</span>
+        </div>`;
+    }).join("");
+}
+
+function formatLogDate(dateStr) {
+    if (!dateStr) return "—";
+    const d = new Date(dateStr);
+    return d.toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" });
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -322,8 +353,6 @@ async function deleteFixedTrade(tradeId, stockName) {
 // ── Chartink ──────────────────────────────────────────────────────────────────
 
 function loadChartinkSection() {
-    document.getElementById("webhookUrl").value =
-        window.location.origin + "/api/webhook/chartink";
     loadWebhookSettings();
 }
 
@@ -338,13 +367,6 @@ async function loadWebhookSettings() {
     document.getElementById("webhookLotSize").value = s.webhook_lot_size || 1;
     document.getElementById("webhookProfit").value = s.webhook_profit_target || 15000;
     document.getElementById("webhookLoss").value = s.webhook_loss_limit || 12000;
-}
-
-function copyWebhookUrl() {
-    const url = document.getElementById("webhookUrl").value;
-    navigator.clipboard.writeText(url).then(() => {
-        showToast("Webhook URL copied!", "success");
-    });
 }
 
 async function saveWebhookSettings() {
@@ -370,37 +392,9 @@ async function saveWebhookSettings() {
 
     const data = await api("/api/settings/save", { method: "POST", body: JSON.stringify(body) });
     if (data.success) {
-        showToast("Webhook configuration saved", "success");
+        showToast("Screener configuration saved", "success");
     } else {
         showToast(data.error || "Failed to save", "error");
-    }
-}
-
-async function testWebhook() {
-    const stock = document.getElementById("testWebhookStock").value.trim().toUpperCase();
-    if (!stock) {
-        showToast("Enter a stock name", "error");
-        return;
-    }
-
-    const resultEl = document.getElementById("testWebhookResult");
-    resultEl.style.display = "block";
-    resultEl.style.color = "#8b949e";
-    resultEl.textContent = `Firing signal for ${stock}...`;
-
-    const data = await api("/api/webhook/test", {
-        method: "POST",
-        body: JSON.stringify({ stock_name: stock })
-    });
-
-    if (data.success) {
-        resultEl.style.color = "#2ecc71";
-        resultEl.textContent = data.message;
-        showToast(data.message, "success");
-    } else {
-        resultEl.style.color = "#e74c3c";
-        resultEl.textContent = data.error || "Test failed";
-        showToast(data.error || "Test failed", "error");
     }
 }
 
@@ -459,6 +453,50 @@ function downloadReport() {
     const year = document.getElementById("reportYear").value;
     const month = document.getElementById("reportMonth").value;
     window.open(`/api/reports/download?year=${year}&month=${month}`, "_blank");
+}
+
+// ── Yearly Report ───────────────────────────────────────────────────────────────
+
+let currentYearlyReport = null;
+
+async function generateYearlyReport() {
+    const year = document.getElementById("yearlyReportYear").value;
+    const data = await api(`/api/reports/yearly?year=${year}`);
+
+    if (data.error) {
+        showToast(data.error, "error");
+        return;
+    }
+
+    currentYearlyReport = data;
+    document.getElementById("yearlyReportOutput").style.display = "block";
+    document.getElementById("yearlyReportTitle").textContent = `${year} Yearly Report`;
+    document.getElementById("yTotalTrades").textContent = data.total_trades;
+
+    const pnlEl = document.getElementById("yNetPnl");
+    pnlEl.textContent = `₹${data.total_pnl.toFixed(2)}`;
+    pnlEl.className = "value " + (data.total_pnl >= 0 ? "positive" : "negative");
+
+    document.getElementById("yWinLoss").textContent = `${data.profitable_trades} / ${data.losing_trades}`;
+
+    const tbody = document.getElementById("yearlyBreakdownBody");
+    tbody.innerHTML = data.monthly_breakdown.map(m => {
+        const pnlClass = m.total_pnl >= 0 ? "pnl-positive" : "pnl-negative";
+        return `
+        <tr>
+            <td>${m.month}</td>
+            <td>${m.total_trades}</td>
+            <td>${m.profitable_trades}</td>
+            <td>${m.losing_trades}</td>
+            <td class="${pnlClass}">₹${m.total_pnl.toFixed(2)}</td>
+        </tr>`;
+    }).join("");
+}
+
+function downloadYearlyReport() {
+    if (!currentYearlyReport) return;
+    const year = document.getElementById("yearlyReportYear").value;
+    window.open(`/api/reports/yearly/download?year=${year}`, "_blank");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -106,32 +106,12 @@
         </div>
     </div>
 
-    <!-- Logs -->
-    <div class="card">
-        <div class="card-header">
-            <h3>Logs</h3>
-            <div style="display:flex;gap:8px;">
-                <select class="form-control" id="logLevelFilter" style="width:120px;padding:5px 8px;font-size:12px;" onchange="loadLogs()">
-                    <option value="">All</option>
-                    <option value="INFO">INFO</option>
-                    <option value="WARNING">WARNING</option>
-                    <option value="ERROR">ERROR</option>
-                </select>
-                <button class="btn btn-secondary btn-sm" onclick="loadLogs()">Refresh</button>
-            </div>
-        </div>
-        <div class="card-body">
-            <div class="logs-container" id="logsContainer">
-                <div class="empty-state">No logs yet</div>
-            </div>
-        </div>
-    </div>
 
 </div>
 
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/dashboard.js?v=2"></script>
+<script src="/static/js/dashboard.js?v=3"></script>
 </body>
 </html>

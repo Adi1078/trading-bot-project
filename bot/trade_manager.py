@@ -446,7 +446,18 @@ def run_webhook_trade(stock_name: str):
             Trade.status == "open"
         ).first()
         if existing:
-            _save_log(db, "INFO", f"Webhook trade for {stock_name} skipped: open trade already exists")
+            _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: open trade already exists")
+            return
+
+        # Once per day per stock — if we already opened a trade for this stock today
+        # (even if it has since closed on target/SL), do not enter it again today.
+        today = get_ist_now().date()
+        recent = (db.query(Trade)
+                  .filter(Trade.stock_name.ilike(stock_name))
+                  .order_by(Trade.id.desc())
+                  .limit(10).all())
+        if any(t.placed_at and t.placed_at.date() == today and not t.is_paper_trade for t in recent):
+            _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: already traded today (once per day)")
             return
 
         watchlist_stock = db.query(Watchlist).filter(Watchlist.stock_name.ilike(stock_name)).first()
@@ -622,6 +633,51 @@ def run_webhook_trade(stock_name: str):
             f"CE {ce_strike}@{ce_premium} sold, PE {pe_strike}@{pe_premium} bought, lot {lot_size}")
         db.commit()
 
+    finally:
+        db.close()
+
+
+def run_chartink_cycle():
+    """
+    One Chartink polling cycle (called by the scheduler every few minutes):
+    run the screeners, keep only symbols that are in the watchlist, and fire a
+    configured trade for each. run_webhook_trade() applies its own guards
+    (watchlist, open-trade dedup, once-per-day), so this is safe to call repeatedly.
+    """
+    db = SessionLocal()
+    try:
+        settings = _get_settings(db)
+        if not settings or not settings.is_trading or not settings.access_token:
+            return
+        watchlist_names = {w.stock_name.upper() for w in db.query(Watchlist).all()}
+    finally:
+        db.close()
+
+    if not watchlist_names:
+        return
+
+    from bot.chartink_scanner import run_chartink_scan
+    symbols = run_chartink_scan()
+    matched = [s for s in symbols if s.upper() in watchlist_names]
+
+    if not matched:
+        return
+
+    _log_simple("INFO", f"Chartink scan: {len(symbols)} stocks found, {len(matched)} in watchlist: {matched}")
+
+    for sym in matched:
+        try:
+            run_webhook_trade(sym)
+        except Exception as e:
+            _log_simple("ERROR", f"Chartink: trade for {sym} failed - {str(e)}")
+
+
+def _log_simple(level: str, message: str):
+    """Write a log row using a fresh session (for use outside a request/db scope)."""
+    db = SessionLocal()
+    try:
+        db.add(Log(level=level, message=message))
+        db.commit()
     finally:
         db.close()
 

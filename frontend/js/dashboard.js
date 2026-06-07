@@ -56,7 +56,6 @@ async function runFixedTradesNow() {
     btn.textContent = "Run Now";
     if (data.success) {
         showToast(data.message, "success");
-        setTimeout(loadLogs, 3000);
     } else {
         showToast(data.error, "error");
     }
@@ -177,28 +176,6 @@ async function loadTradeHistory() {
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 
-async function loadLogs() {
-    const level = document.getElementById("logLevelFilter").value;
-    const url = level ? `/api/logs/?level=${level}&limit=100` : "/api/logs/?limit=100";
-    const data = await api(url);
-    const container = document.getElementById("logsContainer");
-
-    if (!data.logs || data.logs.length === 0) {
-        container.innerHTML = `<div class="empty-state">No logs yet</div>`;
-        return;
-    }
-
-    container.innerHTML = data.logs.map(log => {
-        const badgeClass = log.level === "ERROR" ? "badge-error" : log.level === "WARNING" ? "badge-warning" : "badge-info";
-        return `
-        <div class="log-entry">
-            <span class="log-time">${formatDate(log.created_at)}</span>
-            <span class="badge ${badgeClass}">${log.level}</span>
-            <span class="log-msg">${log.message}</span>
-        </div>`;
-    }).join("");
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatDate(dateStr) {
@@ -213,7 +190,6 @@ function refreshAll() {
     loadPnl();
     loadLiveTrades();
     loadTradeHistory();
-    loadLogs();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
