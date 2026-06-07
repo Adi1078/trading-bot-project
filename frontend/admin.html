@@ -370,6 +370,19 @@
         <!-- Logs Section -->
         <div class="section" id="section-logs">
             <div class="section-title">Logs</div>
+
+            <div class="card">
+                <div class="card-header"><h3>For Development Use</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <p style="color:#8b949e;margin-bottom:12px;font-size:13px;">
+                        Manually trigger the fixed trades right now, instead of waiting for the
+                        scheduled start time. For testing only — requires the broker connected,
+                        the Trade switch ON, and a trading day (not a weekend/holiday).
+                    </p>
+                    <button class="btn btn-warning" id="runNowBtn" onclick="runFixedTradesNow()">Run Now</button>
+                </div>
+            </div>
+
             <div class="card">
                 <div class="card-header">
                     <h3>Logs</h3>
@@ -465,6 +478,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=3"></script>
+<script src="/static/js/admin.js?v=4"></script>
 </body>
 </html>

@@ -47,20 +47,6 @@ function connectBroker() {
     window.location.href = "/api/auth/login";
 }
 
-async function runFixedTradesNow() {
-    const btn = document.getElementById("runNowBtn");
-    btn.disabled = true;
-    btn.textContent = "Running...";
-    const data = await api("/api/dashboard/run-fixed-trades-now", { method: "POST" });
-    btn.disabled = false;
-    btn.textContent = "Run Now";
-    if (data.success) {
-        showToast(data.message, "success");
-    } else {
-        showToast(data.error, "error");
-    }
-}
-
 // ── Trading Toggle ────────────────────────────────────────────────────────────
 
 async function loadTradingStatus() {

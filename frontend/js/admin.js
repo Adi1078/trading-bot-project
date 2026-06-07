@@ -35,6 +35,21 @@ function showSection(e, name) {
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 
+async function runFixedTradesNow() {
+    const btn = document.getElementById("runNowBtn");
+    btn.disabled = true;
+    btn.textContent = "Running...";
+    const data = await api("/api/dashboard/run-fixed-trades-now", { method: "POST" });
+    btn.disabled = false;
+    btn.textContent = "Run Now";
+    if (data.success) {
+        showToast(data.message, "success");
+        setTimeout(loadLogs, 3000);
+    } else {
+        showToast(data.error, "error");
+    }
+}
+
 async function loadLogs() {
     const level = document.getElementById("logLevelFilter").value;
     const url = level ? `/api/logs/?level=${level}&limit=100` : "/api/logs/?limit=100";
