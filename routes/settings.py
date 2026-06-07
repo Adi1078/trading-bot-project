@@ -24,6 +24,7 @@ class SettingsRequest(BaseModel):
     webhook_month_type: Optional[str] = None
     webhook_profit_target: Optional[int] = None
     webhook_loss_limit: Optional[int] = None
+    webhook_is_paper: Optional[bool] = None
 
 
 @router.get("/")
@@ -49,6 +50,7 @@ def get_settings(db: Session = Depends(get_db)):
             "webhook_month_type": settings.webhook_month_type or "current",
             "webhook_profit_target": settings.webhook_profit_target or 15000,
             "webhook_loss_limit": settings.webhook_loss_limit or 12000,
+            "webhook_is_paper": bool(getattr(settings, "webhook_is_paper", False)),
             "is_trading": settings.is_trading
         }
     }
@@ -90,6 +92,8 @@ def save_settings(request: SettingsRequest, db: Session = Depends(get_db)):
         settings.webhook_profit_target = request.webhook_profit_target
     if request.webhook_loss_limit is not None:
         settings.webhook_loss_limit = request.webhook_loss_limit
+    if request.webhook_is_paper is not None:
+        settings.webhook_is_paper = request.webhook_is_paper
 
     log = Log(level="INFO", message="Settings updated")
     db.add(log)

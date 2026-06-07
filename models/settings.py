@@ -24,3 +24,4 @@ class Settings(Base):
     webhook_month_type = Column(String, default="current")  # "current" or "next"
     webhook_profit_target = Column(Integer, default=15000)
     webhook_loss_limit = Column(Integer, default=12000)
+    webhook_is_paper = Column(Boolean, default=False)       # paper mode for Chartink screener trades

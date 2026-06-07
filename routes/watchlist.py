@@ -85,12 +85,25 @@ def search_stocks(query: str):
         return {"success": False, "instruments": [], "error": result["error"]}
 
     query_lower = query.lower()
-    matched = [
-        inst for inst in result["instruments"]
-        if query_lower in inst.get("Symbol", "").lower()
-        or query_lower in inst.get("FullName", "").lower()
-    ][:20]
 
+    # Cash segment only (ExchType "C") — removes F&O contract rows that share the
+    # same name, so the correct spot/equity scrip code is suggested (e.g. CHOLAFIN
+    # 685, not a derivative code). Indices stay searchable (only F&O rows dropped).
+    cash = [
+        inst for inst in result["instruments"]
+        if inst.get("ExchType") == "C"
+        and (query_lower in inst.get("Symbol", "").lower()
+             or query_lower in inst.get("FullName", "").lower())
+    ]
+
+    # De-duplicate by symbol, preferring the EQ series when a symbol has several rows.
+    by_symbol = {}
+    for inst in cash:
+        name = inst.get("Symbol", "")
+        if name not in by_symbol or inst.get("Series") == "EQ":
+            by_symbol[name] = inst
+
+    matched = list(by_symbol.values())[:20]
     return {"success": True, "instruments": matched}
 
 

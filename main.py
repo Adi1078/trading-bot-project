@@ -12,6 +12,18 @@ from routes import auth, dashboard, watchlist, fixed_trades, settings, logs, rep
 async def lifespan(app: FastAPI):
     init_db()
     start_scheduler()
+    # Warm the 5paisa instrument cache in the background so the very first stock
+    # search is instant (otherwise the first search blocks while the CSV downloads).
+    import threading
+
+    def _warm_scrip_cache():
+        try:
+            from broker.fivepaisa import get_scrip_master
+            get_scrip_master()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm_scrip_cache, daemon=True).start()
     yield
     stop_scheduler()
 

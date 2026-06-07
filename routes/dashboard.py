@@ -11,15 +11,30 @@ router = APIRouter()
 
 @router.get("/pnl")
 def get_total_pnl(db: Session = Depends(get_db)):
-    """Get total P&L and trade counts."""
+    """
+    Get P&L and trade counts, split into real-money and paper trades.
+    The headline (total) P&L is real-money only — paper trades are reported
+    separately and never mixed into the real numbers.
+    """
     closed_trades = db.query(Trade).filter(Trade.status == "closed").all()
     open_trades = db.query(Trade).filter(Trade.status == "open").all()
-    total_pnl = sum(t.pnl for t in closed_trades if t.pnl is not None)
+
+    real_closed = [t for t in closed_trades if not t.is_paper_trade]
+    paper_closed = [t for t in closed_trades if t.is_paper_trade]
+    real_open = [t for t in open_trades if not t.is_paper_trade]
+    paper_open = [t for t in open_trades if t.is_paper_trade]
+
+    real_pnl = sum(t.pnl for t in real_closed if t.pnl is not None)
+    paper_pnl = sum(t.pnl for t in paper_closed if t.pnl is not None)
 
     return {
-        "total_pnl": round(total_pnl, 2),
-        "open_trades_count": len(open_trades),
-        "closed_trades_count": len(closed_trades)
+        "total_pnl": round(real_pnl, 2),   # real-money only (paper excluded)
+        "real_pnl": round(real_pnl, 2),
+        "paper_pnl": round(paper_pnl, 2),
+        "real_open_count": len(real_open),
+        "real_closed_count": len(real_closed),
+        "paper_open_count": len(paper_open),
+        "paper_closed_count": len(paper_closed),
     }
 
 

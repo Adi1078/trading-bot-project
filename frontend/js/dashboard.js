@@ -72,11 +72,18 @@ function updateTradingLabel(isTrading) {
 
 async function loadPnl() {
     const data = await api("/api/dashboard/pnl");
-    const pnlEl = document.getElementById("totalPnl");
-    pnlEl.textContent = `₹${data.total_pnl.toFixed(2)}`;
-    pnlEl.className = "value " + (data.total_pnl >= 0 ? "positive" : "negative");
-    document.getElementById("openTradesCount").textContent = data.open_trades_count;
-    document.getElementById("closedTradesCount").textContent = data.closed_trades_count;
+
+    const realEl = document.getElementById("realPnl");
+    realEl.textContent = `₹${data.real_pnl.toFixed(2)}`;
+    realEl.className = "value " + (data.real_pnl >= 0 ? "positive" : "negative");
+    document.getElementById("realOpenCount").textContent = data.real_open_count;
+    document.getElementById("realClosedCount").textContent = data.real_closed_count;
+
+    const paperEl = document.getElementById("paperPnl");
+    paperEl.textContent = `₹${data.paper_pnl.toFixed(2)}`;
+    paperEl.className = "value " + (data.paper_pnl >= 0 ? "positive" : "negative");
+    document.getElementById("paperOpenCount").textContent = data.paper_open_count;
+    document.getElementById("paperClosedCount").textContent = data.paper_closed_count;
 }
 
 // ── Live Trades ───────────────────────────────────────────────────────────────

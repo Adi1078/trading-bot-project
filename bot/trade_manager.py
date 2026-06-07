@@ -441,6 +441,10 @@ def run_webhook_trade(stock_name: str):
             _save_log(db, "ERROR", f"Webhook trade for {stock_name} skipped: trading stopped or broker disconnected")
             return
 
+        # Paper mode for screener trades — when ON, NO real orders are ever placed;
+        # the trade is recorded on real live data only (same as fixed-trade paper).
+        is_paper = bool(getattr(settings, "webhook_is_paper", False))
+
         existing = db.query(Trade).filter(
             Trade.stock_name.ilike(stock_name),
             Trade.status == "open"
@@ -451,12 +455,13 @@ def run_webhook_trade(stock_name: str):
 
         # Once per day per stock — if we already opened a trade for this stock today
         # (even if it has since closed on target/SL), do not enter it again today.
+        # Compared within the same mode so paper testing doesn't block live, or vice versa.
         today = get_ist_now().date()
         recent = (db.query(Trade)
                   .filter(Trade.stock_name.ilike(stock_name))
                   .order_by(Trade.id.desc())
                   .limit(10).all())
-        if any(t.placed_at and t.placed_at.date() == today and not t.is_paper_trade for t in recent):
+        if any(t.placed_at and t.placed_at.date() == today and bool(t.is_paper_trade) == is_paper for t in recent):
             _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: already traded today (once per day)")
             return
 
@@ -518,29 +523,33 @@ def run_webhook_trade(stock_name: str):
 
         # ── Option trade: naked CE sell only ────────────────────────────────
         if trade_type == "option":
-            ce_result = fivepaisa.place_order(
-                settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
-                generate_remote_order_id(stock_name + "_CE")
-            )
-            if not ce_result["success"]:
-                _save_log(db, "ERROR", f"Webhook {stock_name}: CE sell failed - {ce_result['error']}")
-                return
+            ce_order_id = None
+            if not is_paper:
+                ce_result = fivepaisa.place_order(
+                    settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
+                    generate_remote_order_id(stock_name + "_CE")
+                )
+                if not ce_result["success"]:
+                    _save_log(db, "ERROR", f"Screener {stock_name}: CE sell failed - {ce_result['error']}")
+                    return
+                ce_order_id = str(ce_result["broker_order_id"])
 
             trade = Trade(
                 stock_name=stock_name.upper(),
                 trade_source="webhook",
-                is_paper_trade=False,
+                is_paper_trade=is_paper,
                 month_type=month_type,
                 lot_size=lot_size,
                 ce_scrip_code=ce_scrip_code,
-                ce_broker_order_id=str(ce_result["broker_order_id"]),
+                ce_broker_order_id=ce_order_id,
                 ce_entry_price=ce_premium,
                 profit_target=profit_target,
                 loss_limit=loss_limit,
                 status="open"
             )
             db.add(trade)
-            _save_log(db, "INFO", f"Webhook {stock_name}: naked CE sell placed — strike {ce_strike}, premium {ce_premium}, lot {lot_size}")
+            mode = "PAPER" if is_paper else "LIVE"
+            _save_log(db, "INFO", f"Screener {stock_name}: naked CE sell ({mode}) — strike {ce_strike}, premium {ce_premium}, lot {lot_size}")
             db.commit()
             return
 
@@ -575,51 +584,57 @@ def run_webhook_trade(stock_name: str):
         if fut_price is not None:
             futures_price = fut_price
 
-        futures_result = fivepaisa.place_order(
-            settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
-            generate_remote_order_id(stock_name + "_FUT")
-        )
-        ce_result = fivepaisa.place_order(
-            settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
-            generate_remote_order_id(stock_name + "_CE")
-        )
-        pe_result = fivepaisa.place_order(
-            settings.access_token, "N", "D", pe_scrip_code, "B", 0, lot_size, False,
-            generate_remote_order_id(stock_name + "_PE")
-        )
+        futures_order_id = ce_order_id = pe_order_id = None
+        if not is_paper:
+            futures_result = fivepaisa.place_order(
+                settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
+                generate_remote_order_id(stock_name + "_FUT")
+            )
+            ce_result = fivepaisa.place_order(
+                settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
+                generate_remote_order_id(stock_name + "_CE")
+            )
+            pe_result = fivepaisa.place_order(
+                settings.access_token, "N", "D", pe_scrip_code, "B", 0, lot_size, False,
+                generate_remote_order_id(stock_name + "_PE")
+            )
 
-        if not all([futures_result["success"], ce_result["success"], pe_result["success"]]):
-            errors = []
-            placed_legs = []
-            if futures_result["success"]:
-                placed_legs.append((futures_scrip_code, "B", "FUT"))
-            else:
-                errors.append(f"Futures: {futures_result['error']}")
-            if ce_result["success"]:
-                placed_legs.append((ce_scrip_code, "S", "CE"))
-            else:
-                errors.append(f"CE: {ce_result['error']}")
-            if pe_result["success"]:
-                placed_legs.append((pe_scrip_code, "B", "PE"))
-            else:
-                errors.append(f"PE: {pe_result['error']}")
-            _save_log(db, "ERROR", f"Webhook {stock_name}: order(s) failed — {'; '.join(errors)}")
-            if placed_legs:
-                _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size)
-            return
+            if not all([futures_result["success"], ce_result["success"], pe_result["success"]]):
+                errors = []
+                placed_legs = []
+                if futures_result["success"]:
+                    placed_legs.append((futures_scrip_code, "B", "FUT"))
+                else:
+                    errors.append(f"Futures: {futures_result['error']}")
+                if ce_result["success"]:
+                    placed_legs.append((ce_scrip_code, "S", "CE"))
+                else:
+                    errors.append(f"CE: {ce_result['error']}")
+                if pe_result["success"]:
+                    placed_legs.append((pe_scrip_code, "B", "PE"))
+                else:
+                    errors.append(f"PE: {pe_result['error']}")
+                _save_log(db, "ERROR", f"Screener {stock_name}: order(s) failed — {'; '.join(errors)}")
+                if placed_legs:
+                    _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size)
+                return
+
+            futures_order_id = str(futures_result["broker_order_id"])
+            ce_order_id = str(ce_result["broker_order_id"])
+            pe_order_id = str(pe_result["broker_order_id"])
 
         trade = Trade(
             stock_name=stock_name.upper(),
             trade_source="webhook",
-            is_paper_trade=False,
+            is_paper_trade=is_paper,
             month_type=month_type,
             lot_size=lot_size,
             futures_scrip_code=futures_scrip_code,
             ce_scrip_code=ce_scrip_code,
             pe_scrip_code=pe_scrip_code,
-            futures_broker_order_id=str(futures_result["broker_order_id"]),
-            ce_broker_order_id=str(ce_result["broker_order_id"]),
-            pe_broker_order_id=str(pe_result["broker_order_id"]),
+            futures_broker_order_id=futures_order_id,
+            ce_broker_order_id=ce_order_id,
+            pe_broker_order_id=pe_order_id,
             futures_entry_price=futures_price,
             ce_entry_price=ce_premium,
             pe_entry_price=pe_premium,
@@ -628,8 +643,9 @@ def run_webhook_trade(stock_name: str):
             status="open"
         )
         db.add(trade)
+        mode = "PAPER" if is_paper else "LIVE"
         _save_log(db, "INFO",
-            f"Webhook {stock_name}: collar placed — Futures@{futures_price}, "
+            f"Screener {stock_name}: collar placed ({mode}) — Futures@{futures_price}, "
             f"CE {ce_strike}@{ce_premium} sold, PE {pe_strike}@{pe_premium} bought, lot {lot_size}")
         db.commit()
 

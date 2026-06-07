@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Bot — Dashboard</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=3">
+    <title>iAction Pulse — Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=4">
 </head>
 <body>
 
 <!-- Topbar -->
 <div class="topbar">
-    <div class="brand">📈 Trading Bot</div>
+    <div class="brand">⚡ iAction Pulse</div>
     <div class="topbar-right">
         <div class="broker-status">
             <div class="status-dot" id="brokerDot"></div>
@@ -25,26 +25,44 @@
             </label>
             <span>Trade</span>
         </div>
-        <a href="/admin" class="btn btn-secondary">Admin Panel</a>
+        <a href="/admin" class="btn btn-nav">Admin Panel</a>
     </div>
 </div>
 
 <!-- Main Content -->
 <div class="main">
 
-    <!-- Stat Cards -->
+    <!-- Real Trades -->
+    <div class="stats-group-title">Real Trades</div>
     <div class="stats-row">
         <div class="stat-card">
-            <div class="label">Total P&L</div>
-            <div class="value" id="totalPnl">₹0.00</div>
+            <div class="label">Real P&L</div>
+            <div class="value" id="realPnl">₹0.00</div>
         </div>
         <div class="stat-card">
-            <div class="label">Open Trades</div>
-            <div class="value neutral" id="openTradesCount">0</div>
+            <div class="label">Open (Real)</div>
+            <div class="value neutral" id="realOpenCount">0</div>
         </div>
         <div class="stat-card">
-            <div class="label">Closed Trades</div>
-            <div class="value neutral" id="closedTradesCount">0</div>
+            <div class="label">Closed (Real)</div>
+            <div class="value neutral" id="realClosedCount">0</div>
+        </div>
+    </div>
+
+    <!-- Paper Trades -->
+    <div class="stats-group-title">Paper Trades</div>
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="label">Paper P&L</div>
+            <div class="value" id="paperPnl">₹0.00</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Open (Paper)</div>
+            <div class="value neutral" id="paperOpenCount">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Closed (Paper)</div>
+            <div class="value neutral" id="paperClosedCount">0</div>
         </div>
     </div>
 
@@ -111,6 +129,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/dashboard.js?v=4"></script>
+<script src="/static/js/dashboard.js?v=5"></script>
 </body>
 </html>

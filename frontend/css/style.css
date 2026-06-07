@@ -75,6 +75,19 @@ body {
 .btn-danger    { background: #da3633; color: #fff; }
 .btn-secondary { background: #30363d; color: #e6edf3; }
 .btn-warning   { background: #d29922; color: #fff; }
+.btn-nav       { background: #1f6feb; color: #fff; }   /* navigation buttons (Admin Panel / Dashboard) */
+.btn-nav:hover { background: #388bfd; }
+
+/* Stat group headings on the dashboard (Real Trades / Paper Trades) */
+.stats-group-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 18px 0 10px;
+}
+.stats-group-title:first-child { margin-top: 0; }
 .btn-sm        { padding: 5px 10px; font-size: 12px; }
 
 /* ── Trade Toggle ── */

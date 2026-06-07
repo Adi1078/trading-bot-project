@@ -165,21 +165,36 @@ async function loadWatchlist() {
 }
 
 let searchTimeout = null;
+let searchSeq = 0;   // guards against out-of-order responses
 
 async function searchStocks() {
     const query = document.getElementById("stockSearch").value.trim();
     const list = document.getElementById("stockAutocomplete");
+
+    // Typing a new query invalidates any previously selected stock, so a stale
+    // scrip code can never be submitted. (This only clears the input fields,
+    // never the saved watchlist.)
+    document.getElementById("selectedStockName").value = "";
+    document.getElementById("stockScripCode").value = "";
 
     if (query.length < 2) {
         list.classList.remove("show");
         return;
     }
 
+    // Immediate feedback so it never looks "stuck" while the request is in flight.
+    list.innerHTML = `<div class="autocomplete-item" style="color:#8b949e;">Searching…</div>`;
+    list.classList.add("show");
+
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(async () => {
+        const seq = ++searchSeq;
         const data = await api(`/api/watchlist/search?query=${encodeURIComponent(query)}`);
+        if (seq !== searchSeq) return;  // a newer search has superseded this one
+
         if (!data.success || !data.instruments.length) {
-            list.classList.remove("show");
+            list.innerHTML = `<div class="autocomplete-item" style="color:#8b949e;">No matches</div>`;
+            list.classList.add("show");
             return;
         }
 
@@ -189,13 +204,22 @@ async function searchStocks() {
             </div>
         `).join("");
         list.classList.add("show");
-    }, 400);
+    }, 250);
 }
 
 function selectStock(name, scripCode) {
     document.getElementById("stockSearch").value = name;
     document.getElementById("selectedStockName").value = name;
     document.getElementById("stockScripCode").value = scripCode;
+    document.getElementById("stockAutocomplete").classList.remove("show");
+}
+
+// Clears only the Add Stock input fields — makes NO API call, so it can never
+// affect stocks already saved in the watchlist.
+function clearStockSearch() {
+    document.getElementById("stockSearch").value = "";
+    document.getElementById("selectedStockName").value = "";
+    document.getElementById("stockScripCode").value = "";
     document.getElementById("stockAutocomplete").classList.remove("show");
 }
 
@@ -277,8 +301,10 @@ async function loadFixedTrades() {
     `).join("");
 }
 
-function openAddTradeModal() {
-    document.getElementById("tradeModalTitle").textContent = "Add Fixed Trade";
+// Resets the inline Add/Edit form back to "add" mode (no API call).
+function clearFixedTradeForm() {
+    document.getElementById("ftFormTitle").textContent = "Add Fixed Trade";
+    document.getElementById("ftSaveBtn").textContent = "Add Trade";
     document.getElementById("editTradeId").value = "";
     document.getElementById("ftStockName").value = "";
     document.getElementById("ftScripCode").value = "";
@@ -289,11 +315,12 @@ function openAddTradeModal() {
     document.getElementById("ftMonthType").value = "current";
     document.getElementById("ftLotSize").value = "1";
     document.getElementById("ftIsTrade").value = "true";
-    document.getElementById("tradeModal").classList.add("show");
 }
 
+// Loads a row into the same inline form for editing (table stays visible).
 function editFixedTrade(trade) {
-    document.getElementById("tradeModalTitle").textContent = "Edit Fixed Trade";
+    document.getElementById("ftFormTitle").textContent = `Edit Fixed Trade — ${trade.stock_name}`;
+    document.getElementById("ftSaveBtn").textContent = "Update Trade";
     document.getElementById("editTradeId").value = trade.id;
     document.getElementById("ftStockName").value = trade.stock_name;
     document.getElementById("ftScripCode").value = trade.scrip_code || "";
@@ -304,11 +331,7 @@ function editFixedTrade(trade) {
     document.getElementById("ftMonthType").value = trade.month_type;
     document.getElementById("ftLotSize").value = trade.lot_size || 1;
     document.getElementById("ftIsTrade").value = String(trade.is_trade);
-    document.getElementById("tradeModal").classList.add("show");
-}
-
-function closeTradeModal() {
-    document.getElementById("tradeModal").classList.remove("show");
+    document.getElementById("ftFormTitle").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 async function saveFixedTrade() {
@@ -337,7 +360,7 @@ async function saveFixedTrade() {
 
     if (data.success) {
         showToast(editId ? "Trade updated" : "Trade added", "success");
-        closeTradeModal();
+        clearFixedTradeForm();
         loadFixedTrades();
     } else {
         showToast(data.error || "Failed to save trade", "error");
@@ -382,6 +405,7 @@ async function loadWebhookSettings() {
     document.getElementById("webhookLotSize").value = s.webhook_lot_size || 1;
     document.getElementById("webhookProfit").value = s.webhook_profit_target || 15000;
     document.getElementById("webhookLoss").value = s.webhook_loss_limit || 12000;
+    document.getElementById("webhookIsPaper").value = String(s.webhook_is_paper === true);
 }
 
 async function saveWebhookSettings() {
@@ -402,7 +426,8 @@ async function saveWebhookSettings() {
         webhook_strike_value: strikeValue,
         webhook_lot_size: lotSize,
         webhook_profit_target: profit,
-        webhook_loss_limit: loss
+        webhook_loss_limit: loss,
+        webhook_is_paper: document.getElementById("webhookIsPaper").value === "true"
     };
 
     const data = await api("/api/settings/save", { method: "POST", body: JSON.stringify(body) });
