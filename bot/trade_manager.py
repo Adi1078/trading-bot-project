@@ -12,6 +12,46 @@ from utils.helpers import generate_remote_order_id, calculate_trade_pnl, get_ist
 
 logger = logging.getLogger(__name__)
 
+# 5paisa rejects plain market orders ("Kindly place algo limit order"), so every
+# real order is placed as a *marketable limit* order: the price is set slightly in
+# the favourable direction of the live price so it fills immediately, while capping
+# worst-case slippage at this buffer.
+LIMIT_ORDER_BUFFER = 0.01  # 1%
+
+
+def _round_tick(price):
+    """Round to the nearest ₹0.05 tick (exchange requirement) and 2 decimals."""
+    return round(round(price / 0.05) * 0.05, 2)
+
+
+def _marketable_limit_price(ltp, side):
+    """
+    Limit price that behaves like a market order but caps slippage.
+    Buy ("B"): a buffer above LTP; Sell ("S"): a buffer below. Rounded to tick.
+    Falls back to 0 (market) only if LTP is unavailable.
+    """
+    try:
+        ltp = float(ltp)
+    except (TypeError, ValueError):
+        return 0
+    if ltp <= 0:
+        return 0
+    factor = (1 + LIMIT_ORDER_BUFFER) if side == "B" else (1 - LIMIT_ORDER_BUFFER)
+    return _round_tick(ltp * factor)
+
+
+def _leg_ltp(settings, scrip_code):
+    """Fetch the current LTP for a single F&O leg, or None."""
+    if not scrip_code:
+        return None
+    q = fivepaisa.get_market_quote(
+        settings.access_token,
+        [{"exchange": "N", "exchange_type": "D", "scrip_code": scrip_code}]
+    )
+    if q["success"] and q.get("quotes"):
+        return q["quotes"][0]["LastRate"]
+    return None
+
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -67,8 +107,10 @@ def _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size):
     """
     opposite = {"B": "S", "S": "B"}
     for scrip_code, entry_side, leg in placed_legs:
+        side = opposite[entry_side]
+        price = _marketable_limit_price(_leg_ltp(settings, scrip_code), side)
         result = fivepaisa.place_order(
-            settings.access_token, "N", "D", scrip_code, opposite[entry_side], 0, lot_size, False,
+            settings.access_token, "N", "D", scrip_code, side, price, lot_size, False,
             generate_remote_order_id(f"{stock_name}_{leg}_UNWIND")
         )
         if not result["success"]:
@@ -224,9 +266,10 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     contract_size = fivepaisa.get_lot_size(ft.stock_name, expiry) or 1
     lot_size = (ft.lot_size or 1) * contract_size
 
-    # Place all 3 orders using real numeric scrip codes
+    # Place all 3 orders as marketable limit orders (5paisa rejects market orders)
     futures_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
+        settings.access_token, "N", "D", futures_scrip_code, "B",
+        _marketable_limit_price(futures_price, "B"), lot_size, False,
         generate_remote_order_id(ft.stock_name + "_FUT")
     )
     if not futures_result["success"]:
@@ -235,7 +278,8 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     placed_legs = [(futures_scrip_code, "B", "FUT")]
 
     ce_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
+        settings.access_token, "N", "D", ce_scrip_code, "S",
+        _marketable_limit_price(ce_premium, "S"), lot_size, False,
         generate_remote_order_id(ft.stock_name + "_CE")
     )
     if not ce_result["success"]:
@@ -245,7 +289,8 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     placed_legs.append((ce_scrip_code, "S", "CE"))
 
     pe_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", pe_scrip_code, "B", 0, lot_size, False,
+        settings.access_token, "N", "D", pe_scrip_code, "B",
+        _marketable_limit_price(pe_premium, "B"), lot_size, False,
         generate_remote_order_id(ft.stock_name + "_PE")
     )
     if not pe_result["success"]:
@@ -310,30 +355,40 @@ def _place_option_trade(db, settings, ft: FixedTrade):
 
     contract_size = fivepaisa.get_lot_size(ft.stock_name, expiry) or 1
     lot_size = (ft.lot_size or 1) * contract_size
-    ce_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
-        generate_remote_order_id(ft.stock_name + "_CE")
-    )
-    if not ce_result["success"]:
-        _save_log(db, "ERROR", f"{ft.stock_name}: option CE sell failed - {ce_result['error']}")
-        return
+
+    # Respect the Paper/Live setting — a naked-CE row marked Paper must NOT place a
+    # real order (previously this path ignored ft.is_trade and always traded live).
+    is_paper = not ft.is_trade
+    ce_premium = ce_option.get("LastRate", 0)
+    ce_order_id = None
+    if not is_paper:
+        ce_result = fivepaisa.place_order(
+            settings.access_token, "N", "D", ce_scrip_code, "S",
+            _marketable_limit_price(ce_premium, "S"), lot_size, False,
+            generate_remote_order_id(ft.stock_name + "_CE")
+        )
+        if not ce_result["success"]:
+            _save_log(db, "ERROR", f"{ft.stock_name}: option CE sell failed - {ce_result['error']}")
+            return
+        ce_order_id = str(ce_result["broker_order_id"])
 
     trade = Trade(
         stock_name=ft.stock_name,
         trade_source="fixed",
         fixed_trade_id=ft.id,
-        is_paper_trade=False,
+        is_paper_trade=is_paper,
         month_type="option",
         lot_size=lot_size,
         ce_scrip_code=ce_scrip_code,
-        ce_broker_order_id=str(ce_result["broker_order_id"]),
+        ce_broker_order_id=ce_order_id,
         ce_entry_price=ce_option.get("LastRate", ce_strike),
         profit_target=ft.profit_target,
         loss_limit=ft.loss_limit,
         status="open"
     )
     db.add(trade)
-    _save_log(db, "INFO", f"{ft.stock_name}: option CE sell placed at strike {ce_strike}, scrip {ce_scrip_code}")
+    mode = "PAPER" if is_paper else "LIVE"
+    _save_log(db, "INFO", f"{ft.stock_name}: option CE sell ({mode}) at strike {ce_strike}, scrip {ce_scrip_code}")
     db.commit()
 
 
@@ -526,7 +581,8 @@ def run_webhook_trade(stock_name: str):
             ce_order_id = None
             if not is_paper:
                 ce_result = fivepaisa.place_order(
-                    settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
+                    settings.access_token, "N", "D", ce_scrip_code, "S",
+                    _marketable_limit_price(ce_premium, "S"), lot_size, False,
                     generate_remote_order_id(stock_name + "_CE")
                 )
                 if not ce_result["success"]:
@@ -587,15 +643,18 @@ def run_webhook_trade(stock_name: str):
         futures_order_id = ce_order_id = pe_order_id = None
         if not is_paper:
             futures_result = fivepaisa.place_order(
-                settings.access_token, "N", "D", futures_scrip_code, "B", 0, lot_size, False,
+                settings.access_token, "N", "D", futures_scrip_code, "B",
+                _marketable_limit_price(futures_price, "B"), lot_size, False,
                 generate_remote_order_id(stock_name + "_FUT")
             )
             ce_result = fivepaisa.place_order(
-                settings.access_token, "N", "D", ce_scrip_code, "S", 0, lot_size, False,
+                settings.access_token, "N", "D", ce_scrip_code, "S",
+                _marketable_limit_price(ce_premium, "S"), lot_size, False,
                 generate_remote_order_id(stock_name + "_CE")
             )
             pe_result = fivepaisa.place_order(
-                settings.access_token, "N", "D", pe_scrip_code, "B", 0, lot_size, False,
+                settings.access_token, "N", "D", pe_scrip_code, "B",
+                _marketable_limit_price(pe_premium, "B"), lot_size, False,
                 generate_remote_order_id(stock_name + "_PE")
             )
 
@@ -799,10 +858,11 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
 
 def _square_off_legs(db, settings, trade: Trade):
     """
-    Close a filled position by placing opposite-side MARKET orders (square off).
+    Close a filled position by placing opposite-side marketable-limit orders (square off).
 
-    The collar legs are market orders that fill instantly, so they cannot be
-    "cancelled" — they must be reversed. Entry sides are fixed by the strategy:
+    Filled positions can't be "cancelled" — they must be reversed with an opposite
+    order (priced as a marketable limit per the broker's no-market-order rule).
+    Entry sides are fixed by the strategy:
         Futures = Buy, CE = Sell, PE = Buy
     so the exits are the opposite:
         Futures = Sell, CE = Buy, PE = Sell
@@ -819,8 +879,9 @@ def _square_off_legs(db, settings, trade: Trade):
     for scrip_code, side, leg in square_offs:
         if not scrip_code:
             continue
+        price = _marketable_limit_price(_leg_ltp(settings, scrip_code), side)
         result = fivepaisa.place_order(
-            settings.access_token, "N", "D", scrip_code, side, 0, lot_size, False,
+            settings.access_token, "N", "D", scrip_code, side, price, lot_size, False,
             generate_remote_order_id(f"{trade.stock_name}_{leg}_EXIT")
         )
         if not result["success"]:

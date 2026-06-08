@@ -2,7 +2,7 @@ import logging
 import threading
 import time
 from datetime import date
-from utils.helpers import get_ist_now, is_market_hours, is_safety_check_time, is_within_trading_window
+from utils.helpers import get_ist_now, is_market_hours, is_safety_check_time
 from utils.exchange_calendar import is_last_trading_day
 from database import SessionLocal
 from models.settings import Settings
@@ -32,14 +32,19 @@ def _get_settings():
         db.close()
 
 
-def _fixed_trades_ran_today():
-    """Check DB to see if fixed trades already ran today — survives restarts and time changes."""
+def _fixed_trades_fired_for(start_time_str):
+    """
+    True if fixed trades already fired today for THIS entry time. Keyed by the
+    entry time, so changing the entry time later in the day re-arms them to fire
+    again at the new time. Survives restarts (checks the DB log).
+    """
     db = SessionLocal()
     try:
         today = str(date.today())
+        msg = f"Scheduler: triggering fixed trades @{start_time_str}"
         count = db.query(Log).filter(
             Log.level == "INFO",
-            Log.message == "Scheduler: triggering fixed trades",
+            Log.message == msg,
             Log.created_at >= today
         ).count()
         return count > 0
@@ -47,6 +52,16 @@ def _fixed_trades_ran_today():
         return False
     finally:
         db.close()
+
+
+def _past_entry_time(now, start_time_str):
+    """True if the current time has reached the configured entry time."""
+    try:
+        h, m = map(int, start_time_str.split(":"))
+    except Exception:
+        return False
+    entry = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    return now >= entry
 
 
 def _safety_check_ran_today():
@@ -121,11 +136,12 @@ def _run_loop():
                 continue
 
             trade_start = settings.trade_start_time or "09:30"
-            trade_close = settings.trade_close_time or "12:00"
 
-            # ── Place fixed trades once per day at configured start time ──
-            if is_within_trading_window(trade_start, trade_close) and not _fixed_trades_ran_today():
-                _save_log("INFO", "Scheduler: triggering fixed trades")
+            # ── Place fixed trades when the clock reaches the entry time ──
+            # Fires once per entry-time value: if the entry time is changed later
+            # in the day, it fires again at the new time. No looping/re-entry.
+            if _past_entry_time(now, trade_start) and not _fixed_trades_fired_for(trade_start):
+                _save_log("INFO", f"Scheduler: triggering fixed trades @{trade_start}")
                 try:
                     from bot.trade_manager import run_fixed_trades
                     run_fixed_trades()
