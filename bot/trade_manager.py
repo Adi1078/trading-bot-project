@@ -7,7 +7,7 @@ from models.settings import Settings
 from models.log import Log
 from broker import fivepaisa
 from bot.strike_calculator import calculate_ce_strike, find_pe_strike, validate_premium_condition
-from utils.exchange_calendar import get_current_expiry, get_next_expiry, is_last_trading_day
+from utils.exchange_calendar import get_current_expiry, get_next_expiry
 from utils.helpers import generate_remote_order_id, calculate_trade_pnl, get_ist_now
 
 logger = logging.getLogger(__name__)
@@ -312,6 +312,7 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         futures_broker_order_id=str(futures_result["broker_order_id"]),
         ce_broker_order_id=str(ce_result["broker_order_id"]),
         pe_broker_order_id=str(pe_result["broker_order_id"]),
+        expiry_date=chain_result.get("expiry"),
         futures_entry_price=futures_price,
         ce_entry_price=ce_premium,
         pe_entry_price=pe_premium,
@@ -382,6 +383,7 @@ def _place_option_trade(db, settings, ft: FixedTrade):
         ce_scrip_code=ce_scrip_code,
         ce_broker_order_id=ce_order_id,
         ce_entry_price=ce_option.get("LastRate", ce_strike),
+        expiry_date=chain_result.get("expiry"),
         profit_target=ft.profit_target,
         loss_limit=ft.loss_limit,
         status="open"
@@ -466,6 +468,7 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
         is_paper_trade=True,
         month_type=ft.month_type,
         lot_size=total_qty,
+        expiry_date=chain_result.get("expiry"),
         futures_scrip_code=futures_scrip_code,
         ce_scrip_code=ce_scrip_code,
         pe_scrip_code=pe_scrip_code,
@@ -599,6 +602,7 @@ def run_webhook_trade(stock_name: str):
                 ce_scrip_code=ce_scrip_code,
                 ce_broker_order_id=ce_order_id,
                 ce_entry_price=ce_premium,
+                expiry_date=chain_result.get("expiry"),
                 profit_target=profit_target,
                 loss_limit=loss_limit,
                 status="open"
@@ -697,6 +701,7 @@ def run_webhook_trade(stock_name: str):
             futures_entry_price=futures_price,
             ce_entry_price=ce_premium,
             pe_entry_price=pe_premium,
+            expiry_date=chain_result.get("expiry"),
             profit_target=profit_target,
             loss_limit=loss_limit,
             status="open"
@@ -810,17 +815,13 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
 
     now = get_ist_now()
 
-    # Force close on expiry day at 12:00 PM
-    if is_last_trading_day() and now.hour >= 12:
+    # Force close at 12:00 PM on the trade's own expiry date (the real contract
+    # expiry stored when the trade opened). There is no daily close time — a trade
+    # otherwise stays open until target/stop-loss/manual close.
+    today_str = now.strftime("%Y-%m-%d")
+    if trade.expiry_date and today_str >= trade.expiry_date and now.hour >= 12:
         current_prices = _fetch_current_prices(db, settings, trade)
         _close_trade(db, settings, trade, reason="expiry", current_prices=current_prices)
-        return
-
-    # Force close at configured close time
-    close_hour, close_minute = map(int, (settings.trade_close_time or "12:00").split(":"))
-    if now.hour > close_hour or (now.hour == close_hour and now.minute >= close_minute):
-        current_prices = _fetch_current_prices(db, settings, trade)
-        _close_trade(db, settings, trade, reason="time", current_prices=current_prices)
         return
 
     # Get current prices for all legs (paper trades are tracked the same way —
@@ -923,7 +924,9 @@ def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
 
 def safety_check():
     """
-    Run at 3:40 PM. If any trades are still open, send alert email and stop trading.
+    Run at 3:40 PM. Email a summary of the still-open trades with their current
+    P&L. Does NOT stop trading and does NOT close anything — trades are meant to
+    be held until target/stop-loss or their expiry date.
     """
     db = SessionLocal()
     try:
@@ -932,18 +935,32 @@ def safety_check():
             return
 
         settings = _get_settings(db)
-        stock_names = [t.stock_name for t in open_trades]
+        summary = []
+        for t in open_trades:
+            pnl = None
+            if settings and settings.access_token:
+                prices = _fetch_current_prices(db, settings, t)
+                if prices:
+                    cf, cce, cpe = prices
+                    pnl = calculate_trade_pnl(
+                        t.futures_entry_price, cf,
+                        t.ce_entry_price, cce,
+                        t.pe_entry_price, cpe,
+                        lot_size=t.lot_size or 1
+                    )
+            summary.append({
+                "stock_name": t.stock_name,
+                "is_paper": t.is_paper_trade,
+                "pnl": pnl,
+                "target": t.profit_target,
+                "loss": t.loss_limit,
+            })
 
-        _save_log(db, "WARNING", f"Safety check: {len(open_trades)} trades still open at 3:40 PM: {stock_names}")
-
-        if settings:
-            settings.is_trading = False
-            db.commit()
-
+        _save_log(db, "INFO", f"Daily 3:40 PM summary: {len(open_trades)} open trade(s) emailed")
         try:
             from notifications.email import send_safety_alert_email
-            send_safety_alert_email(stock_names)
+            send_safety_alert_email(summary)
         except Exception as e:
-            _save_log(db, "ERROR", f"Safety alert email failed: {str(e)}")
+            _save_log(db, "ERROR", f"Daily summary email failed: {str(e)}")
     finally:
         db.close()

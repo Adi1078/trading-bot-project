@@ -32,6 +32,7 @@ class Trade(Base):
     lot_size = Column(Integer, default=1)
     profit_target = Column(Float, nullable=False)
     loss_limit = Column(Float, nullable=False)
+    expiry_date = Column(String, nullable=True)            # "YYYY-MM-DD" — force-closed at 12:00 PM on this date
 
     status = Column(String, default="open")               # "open" or "closed"
     close_reason = Column(String, nullable=True)          # "profit", "loss", "manual", "expiry", "time"

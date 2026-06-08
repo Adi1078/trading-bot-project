@@ -385,6 +385,7 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
                     "ScripCode": row.get("ScripCode", ""),
                     "StrikeRate": float(row.get("StrikeRate", 0)),
                     "CpType": row.get("ScripType", ""),
+                    "Expiry": row.get("Expiry", "")[:10],
                 })
             except (ValueError, TypeError):
                 continue
@@ -394,6 +395,10 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     instruments = _option_cache.get(cache_key, [])
     if not instruments:
         return {"success": False, "error": f"No options found for {stock_name} expiry {expiry_str} in scrip master"}
+
+    # The real contract expiry these instruments belong to (from the scrip master),
+    # so the trade can be force-closed on its actual expiry date.
+    actual_expiry = instruments[0].get("Expiry", expiry_str)[:10] if instruments[0].get("Expiry") else expiry_str
 
     # Find CE at nearest available strike >= strike_price
     ce_candidates = sorted(
@@ -443,7 +448,7 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
             "LastRate": quotes.get(str(pe["ScripCode"]), 0)
         })
 
-    return {"success": True, "option_chain": option_chain}
+    return {"success": True, "option_chain": option_chain, "expiry": actual_expiry}
 
 
 _scrip_cache = None  # downloaded once per server session, never on every search

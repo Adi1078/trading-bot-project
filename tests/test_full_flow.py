@@ -299,9 +299,8 @@ def test_webhook_skips_existing_open_trade(mock_broker):
 # ── Monitor & Close ───────────────────────────────────────────────────────────
 
 @patch("bot.trade_manager.fivepaisa")
-@patch("bot.trade_manager.is_last_trading_day", return_value=False)
 @patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
-def test_monitor_closes_on_profit(mock_now, mock_expiry, mock_broker):
+def test_monitor_closes_on_profit(mock_now, mock_broker):
     """
     P&L exceeds profit target → trade closed with reason 'profit'.
     Exit: fut=1160, CE=5.0, PE=8.0
@@ -325,9 +324,8 @@ def test_monitor_closes_on_profit(mock_now, mock_expiry, mock_broker):
 
 
 @patch("bot.trade_manager.fivepaisa")
-@patch("bot.trade_manager.is_last_trading_day", return_value=False)
 @patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
-def test_monitor_closes_on_loss(mock_now, mock_expiry, mock_broker):
+def test_monitor_closes_on_loss(mock_now, mock_broker):
     """
     P&L exceeds loss limit → trade closed with reason 'loss'.
     Exit: fut=1100, CE=22.0, PE=8.0
@@ -351,31 +349,12 @@ def test_monitor_closes_on_loss(mock_now, mock_expiry, mock_broker):
 
 
 @patch("bot.trade_manager.fivepaisa")
-@patch("bot.trade_manager.is_last_trading_day", return_value=False)
-@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 15, 5))
-def test_monitor_closes_at_trade_close_time(mock_now, mock_expiry, mock_broker):
-    """Current time (15:05) is past trade_close_time (15:00) → closed with reason 'time'."""
-    add(make_settings(trade_close_time="15:00"), make_open_trade())
-    mock_broker.cancel_order.return_value = cancel_ok()
-
-    with patch("bot.trade_manager.SessionLocal", TestSession):
-        with patch("notifications.email.send_trade_closed_email"):
-            trade_manager.monitor_open_trades()
-
-    db = TestSession()
-    trade = db.query(Trade).first()
-    db.close()
-
-    assert trade.status == "closed"
-    assert trade.close_reason == "time"
-
-
-@patch("bot.trade_manager.fivepaisa")
-@patch("bot.trade_manager.is_last_trading_day", return_value=True)
 @patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 28, 12, 30))
-def test_monitor_closes_on_expiry_day(mock_now, mock_expiry, mock_broker):
-    """On expiry day at 12:00+ → trade force-closed with reason 'expiry'."""
-    add(make_settings(), make_open_trade())
+def test_monitor_closes_on_expiry_day(mock_now, mock_broker):
+    """At 12:00+ on the trade's own expiry date → force-closed with reason 'expiry'."""
+    trade = make_open_trade()
+    trade.expiry_date = "2026-05-28"
+    add(make_settings(), trade)
     mock_broker.cancel_order.return_value = cancel_ok()
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
@@ -391,9 +370,8 @@ def test_monitor_closes_on_expiry_day(mock_now, mock_expiry, mock_broker):
 
 
 @patch("bot.trade_manager.fivepaisa")
-@patch("bot.trade_manager.is_last_trading_day", return_value=False)
 @patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
-def test_monitor_holds_open_when_within_limits(mock_now, mock_expiry, mock_broker):
+def test_monitor_holds_open_when_within_limits(mock_now, mock_broker):
     """
     P&L within limits → trade stays open, no cancel called.
     Exit: fut=1130, CE=12.0, PE=10.0
@@ -416,21 +394,24 @@ def test_monitor_holds_open_when_within_limits(mock_now, mock_expiry, mock_broke
 
 # ── Safety Check ──────────────────────────────────────────────────────────────
 
-def test_safety_check_stops_trading_on_open_positions():
-    """Open trades at 3:40 PM → is_trading flipped to False and warning logged."""
+@patch("bot.trade_manager.fivepaisa")
+def test_safety_check_emails_open_trades_without_stopping(mock_broker):
+    """Open trades at 3:40 PM → summary emailed, trading is NOT stopped."""
     add(make_settings(is_trading=True), make_open_trade())
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1130, 12.0, 10.0)
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
-        with patch("notifications.email.send_safety_alert_email"):
+        with patch("notifications.email.send_safety_alert_email") as mock_email:
             trade_manager.safety_check()
 
     db = TestSession()
     settings = db.query(Settings).first()
-    log = db.query(Log).filter(Log.message.contains("Safety check")).first()
+    log = db.query(Log).filter(Log.message.contains("Daily 3:40 PM summary")).first()
     db.close()
 
-    assert settings.is_trading is False
+    assert settings.is_trading is True   # trading must NOT be stopped
     assert log is not None
+    mock_email.assert_called_once()
 
 
 def test_safety_check_does_nothing_with_no_open_trades():

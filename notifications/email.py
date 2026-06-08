@@ -76,16 +76,40 @@ def send_trade_closed_email(stock_name: str, reason: str, pnl: float):
     _send_email(subject, body)
 
 
-def send_safety_alert_email(open_stocks: list):
-    """Send alert email at 3:40 PM if trades are still open."""
-    stocks_list = "".join(f"<li>{s}</li>" for s in open_stocks)
-    subject = "⚠️ Safety Alert: Open Trades at 3:40 PM"
+def send_safety_alert_email(open_trades: list):
+    """
+    Daily 3:40 PM summary of the still-open trades with their current P&L.
+    open_trades: list of dicts {stock_name, is_paper, pnl, target, loss}.
+    These positions are held until target/stop-loss or their expiry date — this
+    is an informational summary, not an alert to act on.
+    """
+    rows = ""
+    for t in open_trades:
+        pnl = t.get("pnl")
+        if isinstance(pnl, (int, float)):
+            pnl_str = f"₹{pnl:.2f}"
+            color = "#2ecc71" if pnl >= 0 else "#e74c3c"
+        else:
+            pnl_str, color = "—", "#8b949e"
+        mode = "Paper" if t.get("is_paper") else "Live"
+        rows += (
+            f"<tr><td>{t.get('stock_name')}</td><td>{mode}</td>"
+            f"<td style='color:{color};'><b>{pnl_str}</b></td>"
+            f"<td>₹{t.get('target')}</td><td>₹{t.get('loss')}</td></tr>"
+        )
+
+    subject = "Daily Open Trades Summary (3:40 PM)"
     body = f"""
-    <html><body>
-    <h2 style="color:#e67e22;">Safety Alert ⚠️</h2>
-    <p>The following trades are still open at 3:40 PM. Trading has been stopped automatically.</p>
-    <ul>{stocks_list}</ul>
-    <p>Please check your 5paisa account and close positions manually if needed.</p>
+    <html><body style="font-family:Arial,sans-serif;">
+    <h2>Open Trades — End-of-Day Summary</h2>
+    <p>These positions are still open at 3:40 PM. They are held until target /
+    stop-loss or their expiry date — no action needed.</p>
+    <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f0f0f0;">
+            <th>Stock</th><th>Mode</th><th>Current P&amp;L</th><th>Target</th><th>Loss Limit</th>
+        </tr>
+        {rows}
+    </table>
     </body></html>
     """
     _send_email(subject, body)

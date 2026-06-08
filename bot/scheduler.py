@@ -3,7 +3,6 @@ import threading
 import time
 from datetime import date
 from utils.helpers import get_ist_now, is_market_hours, is_safety_check_time
-from utils.exchange_calendar import is_last_trading_day
 from database import SessionLocal
 from models.settings import Settings
 from models.log import Log

@@ -28,6 +28,9 @@ def _ensure_columns():
         "settings": {
             "webhook_is_paper": "BOOLEAN DEFAULT 0",
         },
+        "trades": {
+            "expiry_date": "VARCHAR",
+        },
     }
     try:
         with engine.connect() as conn:
