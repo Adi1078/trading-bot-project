@@ -126,6 +126,25 @@ def save_settings(request: SettingsRequest, db: Session = Depends(get_db)):
     return {"success": True}
 
 
+@router.post("/clear-credentials")
+def clear_credentials(db: Session = Depends(get_db)):
+    """Clear all broker credentials from the database."""
+    settings = db.query(Settings).first()
+    if not settings:
+        return {"success": True}
+
+    settings.app_key = None
+    settings.encry_key = None
+    settings.user_id = None
+    settings.algo_id = None
+
+    log = Log(level="INFO", message="Credentials cleared")
+    db.add(log)
+    db.commit()
+
+    return {"success": True}
+
+
 def _mask(value: str):
     """Mask sensitive credential values."""
     if not value:

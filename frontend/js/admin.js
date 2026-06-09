@@ -120,6 +120,27 @@ async function saveCredentials() {
     }
 }
 
+async function clearCredentials() {
+    if (!confirm("Are you sure you want to clear all broker credentials? This cannot be undone.")) {
+        return;
+    }
+
+    const data = await api("/api/settings/clear-credentials", {
+        method: "POST"
+    });
+
+    if (data.success) {
+        showToast("Credentials cleared successfully", "success");
+        document.getElementById("appKey").value = "";
+        document.getElementById("encryKey").value = "";
+        document.getElementById("userId").value = "";
+        document.getElementById("algoId").value = "";
+        loadSettings();
+    } else {
+        showToast(data.error || "Failed to clear credentials", "error");
+    }
+}
+
 async function saveTradeSettings() {
     const body = {
         notification_email: document.getElementById("notificationEmail").value.trim(),
