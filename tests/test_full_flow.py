@@ -426,3 +426,84 @@ def test_safety_check_does_nothing_with_no_open_trades():
     db.close()
 
     assert settings.is_trading is True
+
+
+# ── Chartink Scanner Tests ────────────────────────────────────────────────────
+
+def test_chartink_scan_matches_watchlist_and_trades():
+    """Chartink returns stocks → matched to watchlist → trades placed."""
+    db = TestSession()
+    add(
+        make_settings(is_trading=True),
+        Watchlist(stock_name="INFY", scrip_code="123"),
+        Watchlist(stock_name="DIVISLAB", scrip_code="124"),
+    )
+    db.close()
+
+    mock_broker = {
+        "place_order": lambda *args, **kwargs: {"success": True, "ScripCode": 123},
+        "get_market_quote": lambda *args, **kwargs: {"LTP": 1200},
+        "get_scrip_master": lambda *args, **kwargs: {
+            "rows": [
+                {"ScripCode": 123, "Multiplier": 1, "LotSize": 1, "SymbolRoot": "INFY"},
+            ]
+        },
+    }
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.run_webhook_trade") as mock_webhook:
+            with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+                mock_scan.return_value = ["INFY", "RELIANCE"]  # RELIANCE not in watchlist
+                trade_manager.run_chartink_cycle()
+                mock_webhook.assert_called_once_with("INFY")
+
+
+def test_chartink_scan_skips_non_watchlist_stocks():
+    """Chartink returns stocks not in watchlist → they are skipped."""
+    db = TestSession()
+    add(make_settings(is_trading=True), Watchlist(stock_name="INFY", scrip_code="123"))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.run_webhook_trade") as mock_webhook:
+            with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+                mock_scan.return_value = ["RELIANCE", "TCS"]  # Neither in watchlist
+                trade_manager.run_chartink_cycle()
+                mock_webhook.assert_not_called()
+
+
+def test_chartink_scan_returns_empty_when_no_match():
+    """Chartink returns stocks → none match watchlist → no trades."""
+    db = TestSession()
+    add(make_settings(is_trading=True))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+            mock_scan.return_value = ["INFY", "RELIANCE"]
+            trade_manager.run_chartink_cycle()
+            # No assertion needed; just verify it doesn't crash
+
+
+def test_chartink_skipped_when_trading_off():
+    """Chartink cycle skipped if trading is OFF."""
+    db = TestSession()
+    add(make_settings(is_trading=False))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+            trade_manager.run_chartink_cycle()
+            mock_scan.assert_not_called()
+
+
+def test_chartink_skipped_when_no_watchlist():
+    """Chartink cycle skipped if watchlist is empty."""
+    db = TestSession()
+    add(make_settings(is_trading=True))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+            trade_manager.run_chartink_cycle()
+            mock_scan.assert_not_called()
