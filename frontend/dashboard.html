@@ -39,11 +39,11 @@
             <div class="label">Real P&L</div>
             <div class="value" id="realPnl">₹0.00</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" onclick="scrollToElement('liveTrades')" style="cursor:pointer;">
             <div class="label">Open (Real)</div>
             <div class="value neutral" id="realOpenCount">0</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" onclick="scrollToElement('tradeHistory')" style="cursor:pointer;">
             <div class="label">Closed (Real)</div>
             <div class="value neutral" id="realClosedCount">0</div>
         </div>
@@ -56,18 +56,18 @@
             <div class="label">Paper P&L</div>
             <div class="value" id="paperPnl">₹0.00</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" onclick="scrollToElement('liveTrades')" style="cursor:pointer;">
             <div class="label">Open (Paper)</div>
             <div class="value neutral" id="paperOpenCount">0</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" onclick="scrollToElement('tradeHistory')" style="cursor:pointer;">
             <div class="label">Closed (Paper)</div>
             <div class="value neutral" id="paperClosedCount">0</div>
         </div>
     </div>
 
     <!-- Live Trades -->
-    <div class="card">
+    <div class="card" id="liveTrades">
         <div class="card-header">
             <h3>Live Trades</h3>
             <button class="btn btn-secondary btn-sm" onclick="loadLiveTrades()">Refresh</button>
@@ -96,7 +96,7 @@
     </div>
 
     <!-- Trade History -->
-    <div class="card">
+    <div class="card" id="tradeHistory">
         <div class="card-header">
             <h3>Trade History</h3>
             <button class="btn btn-secondary btn-sm" onclick="loadTradeHistory()">Refresh</button>

@@ -86,6 +86,13 @@ async function loadPnl() {
     document.getElementById("paperClosedCount").textContent = data.paper_closed_count;
 }
 
+// ── Mobile Navigation ─────────────────────────────────────────────────────────
+
+function scrollToElement(elementId) {
+    const el = document.getElementById(elementId);
+    if (el) el.scrollIntoView({ behavior: 'smooth' });
+}
+
 // ── Live Trades ───────────────────────────────────────────────────────────────
 
 async function loadLiveTrades() {

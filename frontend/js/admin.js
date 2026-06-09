@@ -303,7 +303,7 @@ async function loadFixedTrades() {
     const tbody = document.getElementById("fixedTradesBody");
 
     if (!data.trades || data.trades.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="9" class="empty-state">No fixed trades configured</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="empty-state">No fixed trades configured</td></tr>`;
         return;
     }
 
@@ -321,6 +321,7 @@ async function loadFixedTrades() {
                     ${t.is_trade ? "Yes" : "Paper"}
                 </span>
             </td>
+            <td style="font-size:12px;color:#8b949e;">${formatDate(t.created_at)}</td>
             <td style="display:flex;gap:6px;">
                 <button class="btn btn-secondary btn-sm" onclick="editFixedTrade(${JSON.stringify(t).replace(/"/g, '&quot;')})">Edit</button>
                 <button class="btn btn-warning btn-sm" onclick="toggleTrade(${t.id}, '${t.stock_name}')">Toggle</button>

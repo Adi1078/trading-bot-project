@@ -86,12 +86,20 @@ def search_stocks(query: str):
 
     query_lower = query.lower()
 
-    # Cash equity series only (ExchType "C", Series "EQ"). In 5paisa's data this
-    # keeps stocks AND indices (NIFTY/BANKNIFTY are tagged EQ) while dropping bonds/
-    # NCDs (series NI/NP/NQ/...) and F&O contract rows.
+    # Identify which stocks have F&O (futures/options) available in the scrip master.
+    # A stock has F&O if it appears with ScripType "FUT" or "CE" or "PE".
+    fo_symbols = set()
+    for inst in result["instruments"]:
+        if inst.get("ExchType") == "FO" and inst.get("ScripType") in ("FUT", "CE", "PE"):
+            sym = inst.get("Symbol", "").upper()
+            if sym:
+                fo_symbols.add(sym)
+
+    # Cash equity series only (ExchType "C", Series "EQ"), AND must have F&O available.
     eq = [
         inst for inst in result["instruments"]
         if inst.get("ExchType") == "C" and inst.get("Series") == "EQ"
+        and inst.get("Symbol", "").upper() in fo_symbols
         and (query_lower in inst.get("Symbol", "").lower()
              or query_lower in inst.get("FullName", "").lower())
     ]
