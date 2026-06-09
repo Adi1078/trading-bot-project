@@ -446,7 +446,38 @@ async function deleteFixedTrade(tradeId, stockName) {
 // ── Chartink ──────────────────────────────────────────────────────────────────
 
 function loadChartinkSection() {
+    loadScreenerSettings();
     loadWebhookSettings();
+}
+
+async function loadScreenerSettings() {
+    const data = await api("/api/settings/");
+    if (!data.settings) return;
+    const s = data.settings;
+    document.getElementById("screener1Url").value = s.screener_1_url || "";
+    document.getElementById("screener1Clause").value = s.screener_1_clause || "";
+    document.getElementById("screener2Url").value = s.screener_2_url || "";
+    document.getElementById("screener2Clause").value = s.screener_2_clause || "";
+    document.getElementById("screener3Url").value = s.screener_3_url || "";
+    document.getElementById("screener3Clause").value = s.screener_3_clause || "";
+}
+
+async function saveScreenerSettings() {
+    const body = {
+        screener_1_url: document.getElementById("screener1Url").value.trim(),
+        screener_1_clause: document.getElementById("screener1Clause").value.trim(),
+        screener_2_url: document.getElementById("screener2Url").value.trim(),
+        screener_2_clause: document.getElementById("screener2Clause").value.trim(),
+        screener_3_url: document.getElementById("screener3Url").value.trim(),
+        screener_3_clause: document.getElementById("screener3Clause").value.trim(),
+    };
+
+    const data = await api("/api/settings/save", { method: "POST", body: JSON.stringify(body) });
+    if (data.success) {
+        showToast("Screeners saved successfully", "success");
+    } else {
+        showToast(data.error || "Failed to save screeners", "error");
+    }
 }
 
 async function loadWebhookSettings() {

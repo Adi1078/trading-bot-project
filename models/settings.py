@@ -25,3 +25,9 @@ class Settings(Base):
     webhook_profit_target = Column(Integer, default=15000)
     webhook_loss_limit = Column(Integer, default=12000)
     webhook_is_paper = Column(Boolean, default=False)       # paper mode for Chartink screener trades
+    screener_1_url = Column(String, nullable=True)          # Chartink screener 1 URL (for reference)
+    screener_1_clause = Column(String, nullable=True)       # Screener 1 scan_clause (the payload)
+    screener_2_url = Column(String, nullable=True)
+    screener_2_clause = Column(String, nullable=True)
+    screener_3_url = Column(String, nullable=True)
+    screener_3_clause = Column(String, nullable=True)

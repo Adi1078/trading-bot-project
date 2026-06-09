@@ -27,6 +27,12 @@ def _ensure_columns():
     migrations = {
         "settings": {
             "webhook_is_paper": "BOOLEAN DEFAULT 0",
+            "screener_1_url": "VARCHAR",
+            "screener_1_clause": "TEXT",
+            "screener_2_url": "VARCHAR",
+            "screener_2_clause": "TEXT",
+            "screener_3_url": "VARCHAR",
+            "screener_3_clause": "TEXT",
         },
         "trades": {
             "expiry_date": "VARCHAR",

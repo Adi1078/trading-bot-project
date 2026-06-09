@@ -19,9 +19,8 @@ logger = logging.getLogger(__name__)
 CSRF_PAGE = "https://chartink.com/screener/btst-with-adx-volume-op-1"
 PROCESS_URL = "https://chartink.com/screener/process"
 
-# The three screeners provided by the client. Key = label (used only in logs),
-# value = the scan_clause (the actual filter logic Chartink runs).
-SCAN_CLAUSES = {
+# Default screeners (used as fallback if none are configured in the database).
+DEFAULT_SCAN_CLAUSES = {
     "btst-with-adx-volume-op-1": (
         "( {33492} ( latest close > 3 days ago high and latest close > 2 days ago high "
         "and latest close > 1 day ago high and latest volume > 3 days ago volume and "
@@ -44,6 +43,35 @@ SCAN_CLAUSES = {
         "2 days ago high ) ) "
     ),
 }
+
+
+def _get_configured_screeners():
+    """Read screener config from the database; fall back to defaults if not set."""
+    try:
+        from database import SessionLocal
+        from models.settings import Settings
+        db = SessionLocal()
+        try:
+            s = db.query(Settings).first()
+            if not s:
+                return DEFAULT_SCAN_CLAUSES
+
+            screeners = {}
+            for i in range(1, 4):
+                url_field = f"screener_{i}_url"
+                clause_field = f"screener_{i}_clause"
+                url = getattr(s, url_field, None)
+                clause = getattr(s, clause_field, None)
+                if clause:  # Only add if clause is non-empty
+                    label = url or f"Screener {i}"
+                    screeners[label] = clause
+
+            return screeners if screeners else DEFAULT_SCAN_CLAUSES
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Failed to load screeners from DB: {e} — using defaults")
+        return DEFAULT_SCAN_CLAUSES
 
 # A browser-like User-Agent reduces the chance of Chartink rejecting the request.
 HEADERS = {
@@ -74,6 +102,8 @@ def run_chartink_scan():
     so it never breaks the whole scan; on a total failure an empty list is returned.
     """
     symbols = set()
+    screeners = _get_configured_screeners()
+
     try:
         with requests.Session() as s:
             s.headers.update(HEADERS)
@@ -83,7 +113,7 @@ def run_chartink_scan():
                 logger.error(f"Chartink: failed to get CSRF token - {e}")
                 return []
 
-            for label, clause in SCAN_CLAUSES.items():
+            for label, clause in screeners.items():
                 try:
                     r = s.post(PROCESS_URL, data={"scan_clause": clause}, timeout=15)
                     r.raise_for_status()

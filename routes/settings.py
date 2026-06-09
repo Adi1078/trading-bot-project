@@ -25,6 +25,12 @@ class SettingsRequest(BaseModel):
     webhook_profit_target: Optional[int] = None
     webhook_loss_limit: Optional[int] = None
     webhook_is_paper: Optional[bool] = None
+    screener_1_url: Optional[str] = None
+    screener_1_clause: Optional[str] = None
+    screener_2_url: Optional[str] = None
+    screener_2_clause: Optional[str] = None
+    screener_3_url: Optional[str] = None
+    screener_3_clause: Optional[str] = None
 
 
 @router.get("/")
@@ -51,6 +57,12 @@ def get_settings(db: Session = Depends(get_db)):
             "webhook_profit_target": settings.webhook_profit_target or 15000,
             "webhook_loss_limit": settings.webhook_loss_limit or 12000,
             "webhook_is_paper": bool(getattr(settings, "webhook_is_paper", False)),
+            "screener_1_url": settings.screener_1_url or "",
+            "screener_1_clause": settings.screener_1_clause or "",
+            "screener_2_url": settings.screener_2_url or "",
+            "screener_2_clause": settings.screener_2_clause or "",
+            "screener_3_url": settings.screener_3_url or "",
+            "screener_3_clause": settings.screener_3_clause or "",
             "is_trading": settings.is_trading
         }
     }
@@ -94,6 +106,18 @@ def save_settings(request: SettingsRequest, db: Session = Depends(get_db)):
         settings.webhook_loss_limit = request.webhook_loss_limit
     if request.webhook_is_paper is not None:
         settings.webhook_is_paper = request.webhook_is_paper
+    if request.screener_1_url is not None:
+        settings.screener_1_url = request.screener_1_url
+    if request.screener_1_clause is not None:
+        settings.screener_1_clause = request.screener_1_clause
+    if request.screener_2_url is not None:
+        settings.screener_2_url = request.screener_2_url
+    if request.screener_2_clause is not None:
+        settings.screener_2_clause = request.screener_2_clause
+    if request.screener_3_url is not None:
+        settings.screener_3_url = request.screener_3_url
+    if request.screener_3_clause is not None:
+        settings.screener_3_clause = request.screener_3_clause
 
     log = Log(level="INFO", message="Settings updated")
     db.add(log)
