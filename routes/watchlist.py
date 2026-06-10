@@ -87,13 +87,16 @@ def search_stocks(query: str):
     query_lower = query.lower()
 
     # Identify which stocks have F&O (futures/options) available in the scrip master.
-    # A stock has F&O if it appears with ScripType "FUT" or "CE" or "PE".
+    # In the 5paisa scrip master, derivative contracts have ExchType "D" and their
+    # underlying is the first token of the Symbol, e.g. "INFY 27 Mar 2025 CE 2840.00"
+    # -> "INFY". A stock has F&O if its symbol appears as such an underlying.
     fo_symbols = set()
     for inst in result["instruments"]:
-        if inst.get("ExchType") == "FO" and inst.get("ScripType") in ("FUT", "CE", "PE"):
-            sym = inst.get("Symbol", "").upper()
-            if sym:
-                fo_symbols.add(sym)
+        if inst.get("ExchType") == "D":
+            sym = inst.get("Symbol", "")
+            underlying = sym.split(" ")[0].upper() if sym else ""
+            if underlying:
+                fo_symbols.add(underlying)
 
     # Cash equity series only (ExchType "C", Series "EQ"), AND must have F&O available.
     eq = [
