@@ -21,6 +21,20 @@ def login(db: Session = Depends(get_db)):
         return {"success": False, "error": "App key not configured. Please set it in admin panel."}
 
     login_url = f"{FIVEPAISA_LOGIN_URL}?VendorKey={settings.app_key}&ResponseURL={CALLBACK_URL}"
+
+    # DEBUG: Log the exact URL being generated
+    print("\n" + "="*80)
+    print("DEBUG: OAuth Login URL Generation")
+    print("="*80)
+    print(f"CALLBACK_URL from config: {CALLBACK_URL}")
+    print(f"Full login_url sent to browser: {login_url}")
+    print(f"ResponseURL parameter: {CALLBACK_URL}")
+    if "8181" in login_url:
+        print("✓ login_url CONTAINS port 8181")
+    if "8001" in login_url:
+        print("✗ login_url CONTAINS port 8001 (BAD)")
+    print("="*80 + "\n")
+
     return RedirectResponse(url=login_url)
 
 
