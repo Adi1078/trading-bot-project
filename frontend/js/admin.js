@@ -50,6 +50,20 @@ async function runFixedTradesNow() {
     }
 }
 
+async function runChartinkTrades() {
+    const btn = document.getElementById("runChartinkBtn");
+    btn.disabled = true;
+    btn.textContent = "Running...";
+    const data = await api("/api/dashboard/run-chartink-now", { method: "POST" });
+    btn.disabled = false;
+    btn.textContent = "Run Chartink Trades";
+    if (data.success) {
+        showToast(data.message, "success");
+    } else {
+        showToast(data.error, "error");
+    }
+}
+
 async function loadLogs() {
     const level = document.getElementById("logLevelFilter").value;
     const url = level ? `/api/logs/?level=${level}&limit=100` : "/api/logs/?limit=100";

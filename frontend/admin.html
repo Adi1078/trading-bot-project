@@ -244,9 +244,15 @@
                         The bot automatically runs the configured Chartink screeners <b>every 5 minutes</b>
                         during market hours and reads back the matching stocks. For each stock that is also in
                         your <b>Watchlist</b>, it places a trade using the configuration below. Stocks not in the
-                        watchlist are silently skipped, and each stock is traded at most <b>once per day</b>.<br><br>
+                        watchlist are skipped (and logged), and each stock is attempted at most <b>once per day</b>
+                        — if its order is rejected (e.g. insufficient margin) it is <b>not</b> retried automatically.<br><br>
+                        Use <b>Run Chartink Trades</b> to run the screeners right now and fire trades for
+                        watchlist-matched stocks — this overrides the once-per-day limit, so you can retry a
+                        stock that failed earlier (for example, after topping up margin).<br><br>
                         No setup is needed on Chartink — the screeners are built into the bot.
                     </p>
+                    <button class="btn btn-primary" onclick="runChartinkTrades()" id="runChartinkBtn"
+                            style="margin-top:8px;">Run Chartink Trades</button>
                 </div>
             </div>
 
@@ -547,6 +553,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=9"></script>
+<script src="/static/js/admin.js?v=10"></script>
 </body>
 </html>

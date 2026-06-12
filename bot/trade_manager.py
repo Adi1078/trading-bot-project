@@ -70,6 +70,28 @@ def _is_in_watchlist(db, stock_name: str) -> bool:
     return db.query(Watchlist).filter(Watchlist.stock_name.ilike(stock_name)).first() is not None
 
 
+def _record_screener_attempt(db, stock_name: str, is_paper: bool):
+    """
+    Mark that we attempted a screener trade for this stock today. Written once we
+    commit to attempting (after watchlist + dedup checks), so a stock whose order
+    is later rejected by the broker (e.g. insufficient margin) is NOT re-tried on
+    every 5-minute cycle. A manual "Run Chartink Trades" click bypasses this.
+    """
+    mode = "PAPER" if is_paper else "LIVE"
+    _save_log(db, "INFO", f"Screener attempt recorded: {stock_name.upper()} [{mode}]")
+
+
+def _screener_attempted_today(db, stock_name: str, is_paper: bool) -> bool:
+    """True if we already attempted this stock today in this mode (success OR failure)."""
+    today_str = str(get_ist_now().date())
+    mode = "PAPER" if is_paper else "LIVE"
+    marker = f"Screener attempt recorded: {stock_name.upper()} [{mode}]"
+    return db.query(Log).filter(
+        Log.message == marker,
+        Log.created_at >= today_str
+    ).count() > 0
+
+
 def _get_expiry(month_type: str):
     return get_next_expiry() if month_type == "next" else get_current_expiry()
 
@@ -486,10 +508,15 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
 
 # ─── Webhook Trades (Number 4) ────────────────────────────────────────────────
 
-def run_webhook_trade(stock_name: str):
+def run_webhook_trade(stock_name: str, force: bool = False):
     """
-    Place a trade triggered by a Chartink webhook signal.
+    Place a trade triggered by a Chartink screener match.
     Uses the global webhook configuration from Settings — same config applies to ALL signals.
+
+    force=True (manual "Run Chartink Trades" button) bypasses the once-per-day
+    attempted guard so a stock can be retried after, e.g., margin is topped up.
+    The open-trade dedup still applies even when forced — we never stack two open
+    collars on the same stock.
     """
     db = SessionLocal()
     try:
@@ -511,22 +538,23 @@ def run_webhook_trade(stock_name: str):
             _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: open trade already exists")
             return
 
-        # Once per day per stock — if we already opened a trade for this stock today
-        # (even if it has since closed on target/SL), do not enter it again today.
-        # Compared within the same mode so paper testing doesn't block live, or vice versa.
-        today = get_ist_now().date()
-        recent = (db.query(Trade)
-                  .filter(Trade.stock_name.ilike(stock_name))
-                  .order_by(Trade.id.desc())
-                  .limit(10).all())
-        if any(t.placed_at and t.placed_at.date() == today and bool(t.is_paper_trade) == is_paper for t in recent):
-            _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: already traded today (once per day)")
+        # Once per day per stock — if we already ATTEMPTED this stock today (a
+        # successful trade OR an order rejected by the broker), do not try again
+        # today. This stops a stock whose order keeps getting rejected (e.g.
+        # insufficient margin) from being re-fired every 5-minute scan. A manual
+        # "Run Chartink Trades" click passes force=True to override this.
+        if not force and _screener_attempted_today(db, stock_name, is_paper):
+            _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: already attempted today (once per day)")
             return
 
         watchlist_stock = db.query(Watchlist).filter(Watchlist.stock_name.ilike(stock_name)).first()
         if not watchlist_stock:
-            _save_log(db, "INFO", f"Webhook trade for {stock_name} skipped: not in watchlist")
+            _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: not in watchlist")
             return
+
+        # We are now committed to attempting this stock — record it so automatic
+        # scans won't retry it today regardless of the outcome below.
+        _record_screener_attempt(db, stock_name, is_paper)
 
         # Read global webhook config from settings
         trade_type   = settings.webhook_trade_type or "collar"    # "collar" or "option"
@@ -717,12 +745,13 @@ def run_webhook_trade(stock_name: str):
         db.close()
 
 
-def run_chartink_cycle():
+def run_chartink_cycle(force: bool = False):
     """
-    One Chartink polling cycle (called by the scheduler every few minutes):
-    run the screeners, keep only symbols that are in the watchlist, and fire a
+    One Chartink polling cycle. Called by the scheduler every few minutes
+    (force=False) and by the manual "Run Chartink Trades" button (force=True).
+    Runs the screeners, keeps only symbols that are in the watchlist, and fires a
     configured trade for each. run_webhook_trade() applies its own guards
-    (watchlist, open-trade dedup, once-per-day), so this is safe to call repeatedly.
+    (open-trade dedup, once-per-day attempted), so this is safe to call repeatedly.
     """
     db = SessionLocal()
     try:
@@ -739,15 +768,22 @@ def run_chartink_cycle():
     from bot.chartink_scanner import run_chartink_scan
     symbols = run_chartink_scan()
     matched = [s for s in symbols if s.upper() in watchlist_names]
+    not_in_watchlist = [s for s in symbols if s.upper() not in watchlist_names]
+
+    # Log the stocks the screeners found but that aren't in the watchlist, so it's
+    # clear in the logs why they weren't traded.
+    if not_in_watchlist:
+        _log_simple("INFO", f"Chartink: skipping {len(not_in_watchlist)} stock(s) not in watchlist: {not_in_watchlist}")
 
     if not matched:
         return
 
-    _log_simple("INFO", f"Chartink scan: {len(symbols)} stocks found, {len(matched)} in watchlist: {matched}")
+    mode = " (manual)" if force else ""
+    _log_simple("INFO", f"Chartink scan{mode}: {len(symbols)} stocks found, {len(matched)} in watchlist: {matched}")
 
     for sym in matched:
         try:
-            run_webhook_trade(sym)
+            run_webhook_trade(sym, force=force)
         except Exception as e:
             _log_simple("ERROR", f"Chartink: trade for {sym} failed - {str(e)}")
 

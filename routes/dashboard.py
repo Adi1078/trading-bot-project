@@ -162,6 +162,35 @@ def run_fixed_trades_now(db: Session = Depends(get_db)):
     return {"success": True, "message": "Fixed trades triggered — check logs"}
 
 
+@router.post("/run-chartink-now")
+def run_chartink_now(db: Session = Depends(get_db)):
+    """
+    Manually run the Chartink screeners and fire trades for watchlist-matched
+    stocks right now. Bypasses the once-per-day attempted guard (force=True), so
+    a stock that failed earlier (e.g. insufficient margin) can be retried.
+    """
+    from utils.exchange_calendar import is_trading_day
+    if not is_trading_day():
+        return {"success": False, "error": "Market is closed today (weekend/holiday)"}
+
+    settings = db.query(Settings).first()
+    if not settings or not settings.is_trading:
+        return {"success": False, "error": "Turn on the Trade switch first"}
+    if not settings.access_token:
+        return {"success": False, "error": "Broker not connected"}
+
+    import threading
+    def _run():
+        from bot.trade_manager import run_chartink_cycle
+        run_chartink_cycle(force=True)
+    threading.Thread(target=_run, daemon=True).start()
+
+    log = Log(level="INFO", message="Chartink trades triggered manually by user")
+    db.add(log)
+    db.commit()
+    return {"success": True, "message": "Chartink trades triggered — check logs"}
+
+
 @router.post("/toggle-trading")
 def toggle_trading(db: Session = Depends(get_db)):
     """Toggle the master Trade / Stop Trade switch."""

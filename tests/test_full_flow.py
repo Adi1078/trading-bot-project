@@ -455,7 +455,7 @@ def test_chartink_scan_matches_watchlist_and_trades():
             with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
                 mock_scan.return_value = ["INFY", "RELIANCE"]  # RELIANCE not in watchlist
                 trade_manager.run_chartink_cycle()
-                mock_webhook.assert_called_once_with("INFY")
+                mock_webhook.assert_called_once_with("INFY", force=False)
 
 
 def test_chartink_scan_skips_non_watchlist_stocks():
@@ -507,3 +507,58 @@ def test_chartink_skipped_when_no_watchlist():
         with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
             trade_manager.run_chartink_cycle()
             mock_scan.assert_not_called()
+
+
+def test_manual_chartink_run_forces_trades():
+    """The manual 'Run Chartink Trades' button passes force=True to each trade."""
+    db = TestSession()
+    add(make_settings(is_trading=True), Watchlist(stock_name="INFY", scrip_code="123"))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.run_webhook_trade") as mock_webhook:
+            with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+                mock_scan.return_value = ["INFY"]
+                trade_manager.run_chartink_cycle(force=True)
+                mock_webhook.assert_called_once_with("INFY", force=True)
+
+
+def test_screener_skips_stock_already_attempted_today():
+    """
+    Once a stock has been attempted today (even a rejected order), an automatic
+    screener run must NOT re-attempt it — this stops the all-day order spam.
+    """
+    db = TestSession()
+    add(make_settings(is_trading=True),
+        Watchlist(stock_name="INFY", scrip_code="123"),
+        Log(level="INFO", message="Screener attempt recorded: INFY [LIVE]"))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        # force=False (automatic) — should bail out at the attempted-today guard,
+        # so it never reaches the broker/quote calls.
+        trade_manager.run_webhook_trade("INFY")
+
+    db = TestSession()
+    skipped = db.query(Log).filter(Log.message.contains("already attempted today")).count()
+    db.close()
+    assert skipped >= 1
+
+
+def test_chartink_logs_stocks_not_in_watchlist():
+    """Stocks the screener finds but that aren't in the watchlist are logged."""
+    db = TestSession()
+    add(make_settings(is_trading=True), Watchlist(stock_name="INFY", scrip_code="123"))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.run_webhook_trade"):
+            with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+                mock_scan.return_value = ["INFY", "RELIANCE", "TCS"]
+                trade_manager.run_chartink_cycle()
+
+    db = TestSession()
+    log = db.query(Log).filter(Log.message.contains("not in watchlist")).first()
+    db.close()
+    assert log is not None
+    assert "RELIANCE" in log.message and "TCS" in log.message
