@@ -80,23 +80,6 @@ def _safety_check_ran_today():
         db.close()
 
 
-def _token_reminder_sent_today():
-    """Check DB to see if 8:30 AM token reminder was already sent today."""
-    db = SessionLocal()
-    try:
-        today = str(date.today())
-        count = db.query(Log).filter(
-            Log.level == "INFO",
-            Log.message == "Scheduler: sent daily token reconnect reminder",
-            Log.created_at >= today
-        ).count()
-        return count > 0
-    except Exception:
-        return False
-    finally:
-        db.close()
-
-
 def _run_loop():
     """
     Main scheduler loop. Runs every 10 seconds during market hours so open trades
@@ -115,14 +98,19 @@ def _run_loop():
             now = get_ist_now()
             settings = _get_settings()
 
-            # ── Daily 8:30 AM reconnect reminder (runs outside market hours) ──
-            if now.hour == 8 and now.minute == 30 and not _token_reminder_sent_today():
-                _save_log("INFO", "Scheduler: sent daily token reconnect reminder")
-                try:
-                    from notifications.email import send_token_expiry_reminder
-                    send_token_expiry_reminder()
-                except Exception as e:
-                    _save_log("ERROR", f"Scheduler: token reminder email failed - {str(e)}")
+            # ── End-of-day open-trades summary at 3:40 PM. This runs AFTER market
+            #    close (3:30 PM), so it MUST sit outside the is_market_hours() gate
+            #    below — otherwise the loop bails out before reaching it and the
+            #    summary email never sends. Only on trading days; once per day. ──
+            if is_safety_check_time() and not _safety_check_ran_today():
+                from utils.exchange_calendar import is_trading_day
+                if is_trading_day(now.date()):
+                    _save_log("INFO", "Scheduler: running 3:40 PM safety check")
+                    try:
+                        from bot.trade_manager import safety_check
+                        safety_check()
+                    except Exception as e:
+                        _save_log("ERROR", f"Scheduler: safety_check failed - {str(e)}")
 
             # Only run during market hours
             if not is_market_hours():
@@ -172,15 +160,6 @@ def _run_loop():
                     last_chartink_scan = now
                 except Exception as e:
                     _save_log("ERROR", f"Scheduler: chartink scan failed - {str(e)}")
-
-            # ── Safety check at 3:40 PM once per day ──
-            if is_safety_check_time() and not _safety_check_ran_today():
-                _save_log("INFO", "Scheduler: running 3:40 PM safety check")
-                try:
-                    from bot.trade_manager import safety_check
-                    safety_check()
-                except Exception as e:
-                    _save_log("ERROR", f"Scheduler: safety_check failed - {str(e)}")
 
         except Exception as e:
             _save_log("ERROR", f"Scheduler loop error: {str(e)}")
