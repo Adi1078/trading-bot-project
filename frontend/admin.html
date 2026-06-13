@@ -78,8 +78,8 @@
                         <span style="color:#8b949e;font-size:11px;">All alerts and the end-of-day open-trades summary are sent here.</span>
                     </div>
                     <button class="btn btn-primary" onclick="saveTradeSettings()">Save Settings</button>
-                    <button class="btn btn-secondary" onclick="sendTestEmail()" id="testEmailBtn"
-                            style="margin-left:8px;">Send Test Email</button>
+                    <button class="btn btn-secondary" onclick="sendOpenTradesReport()" id="sendReportBtn"
+                            style="margin-left:8px;">Email Open Trades Report Now</button>
                 </div>
             </div>
         </div>
@@ -556,6 +556,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=11"></script>
+<script src="/static/js/admin.js?v=12"></script>
 </body>
 </html>

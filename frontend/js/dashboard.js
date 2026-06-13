@@ -93,22 +93,6 @@ function scrollToElement(elementId) {
     if (el) el.scrollIntoView({ behavior: 'smooth' });
 }
 
-// ── Email Open-Trades Report ──────────────────────────────────────────────────
-
-async function sendOpenTradesReport() {
-    const btn = document.getElementById("sendReportBtn");
-    btn.disabled = true;
-    btn.textContent = "Sending...";
-    const data = await api("/api/dashboard/send-open-trades-report", { method: "POST" });
-    btn.disabled = false;
-    btn.textContent = "Email Report Now";
-    if (data.success) {
-        showToast(data.message, "success");
-    } else {
-        showToast(data.error || "Failed to send report", "error");
-    }
-}
-
 // ── Live Trades ───────────────────────────────────────────────────────────────
 
 async function loadLiveTrades() {
