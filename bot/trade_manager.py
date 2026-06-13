@@ -958,17 +958,21 @@ def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
 
 # ─── Safety Check ─────────────────────────────────────────────────────────────
 
-def safety_check():
+def safety_check(trigger: str = "3:40 PM"):
     """
-    Run at 3:40 PM. Email a summary of the still-open trades with their current
-    P&L. Does NOT stop trading and does NOT close anything — trades are meant to
-    be held until target/stop-loss or their expiry date.
+    Email a summary of the still-open trades with their current P&L. Used by both
+    the scheduled 3:40 PM job and the manual 'Send Report Now' button. Does NOT
+    stop trading and does NOT close anything — trades are held until target /
+    stop-loss or their expiry date.
+
+    Returns the number of open trades reported (0 = none open, no email sent).
+    Re-raises on email failure so a manual caller can surface the error.
     """
     db = SessionLocal()
     try:
         open_trades = db.query(Trade).filter(Trade.status == "open").all()
         if not open_trades:
-            return
+            return 0
 
         settings = _get_settings(db)
         summary = []
@@ -992,11 +996,14 @@ def safety_check():
                 "loss": t.loss_limit,
             })
 
-        _save_log(db, "INFO", f"Daily 3:40 PM summary: {len(open_trades)} open trade(s) emailed")
         try:
             from notifications.email import send_safety_alert_email
             send_safety_alert_email(summary)
         except Exception as e:
-            _save_log(db, "ERROR", f"Daily summary email failed: {str(e)}")
+            _save_log(db, "ERROR", f"Open-trades summary email failed: {str(e)}")
+            raise
+
+        _save_log(db, "INFO", f"Open-trades summary ({trigger}): {len(open_trades)} open trade(s) emailed")
+        return len(open_trades)
     finally:
         db.close()

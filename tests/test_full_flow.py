@@ -406,7 +406,7 @@ def test_safety_check_emails_open_trades_without_stopping(mock_broker):
 
     db = TestSession()
     settings = db.query(Settings).first()
-    log = db.query(Log).filter(Log.message.contains("Daily 3:40 PM summary")).first()
+    log = db.query(Log).filter(Log.message.contains("Open-trades summary")).first()
     db.close()
 
     assert settings.is_trading is True   # trading must NOT be stopped
@@ -415,17 +415,32 @@ def test_safety_check_emails_open_trades_without_stopping(mock_broker):
 
 
 def test_safety_check_does_nothing_with_no_open_trades():
-    """No open trades → is_trading stays True, no action taken."""
+    """No open trades → is_trading stays True, no action taken, returns 0."""
     add(make_settings(is_trading=True))
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
-        trade_manager.safety_check()
+        result = trade_manager.safety_check()
 
     db = TestSession()
     settings = db.query(Settings).first()
     db.close()
 
     assert settings.is_trading is True
+    assert result == 0
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_safety_check_returns_count_for_manual_report(mock_broker):
+    """Manual 'Email Report Now' → safety_check returns the open-trade count."""
+    add(make_settings(is_trading=True), make_open_trade())
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1130, 12.0, 10.0)
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_safety_alert_email") as mock_email:
+            count = trade_manager.safety_check(trigger="manual")
+
+    assert count == 1
+    mock_email.assert_called_once()
 
 
 # ── Chartink Scanner Tests ────────────────────────────────────────────────────

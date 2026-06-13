@@ -162,6 +162,25 @@ def run_fixed_trades_now(db: Session = Depends(get_db)):
     return {"success": True, "message": "Fixed trades triggered — check logs"}
 
 
+@router.post("/send-open-trades-report")
+def send_open_trades_report(db: Session = Depends(get_db)):
+    """
+    Email the current open-trades summary right now (same report the 3:40 PM job
+    sends). Sends to the configured notification email.
+    """
+    open_count = db.query(Trade).filter(Trade.status == "open").count()
+    if open_count == 0:
+        return {"success": True, "message": "No open trades right now — nothing to send"}
+
+    try:
+        from bot.trade_manager import safety_check
+        count = safety_check(trigger="manual")
+    except Exception as e:
+        return {"success": False, "error": f"Email failed: {str(e)}"}
+
+    return {"success": True, "message": f"Open-trades report ({count} trade(s)) sent — check inbox/spam"}
+
+
 @router.post("/run-chartink-now")
 def run_chartink_now(db: Session = Depends(get_db)):
     """
