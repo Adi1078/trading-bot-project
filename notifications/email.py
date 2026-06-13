@@ -143,12 +143,17 @@ def send_safety_alert_email(open_trades: list):
             f"<td>₹{t.get('target')}</td><td>₹{t.get('loss')}</td></tr>"
         )
 
-    subject = "Daily Open Trades Summary (3:40 PM)"
+    # Timestamp in the subject so each report is a distinct email — otherwise
+    # Gmail threads same-subject reports into one conversation, making several
+    # separate sends look like the "same report repeated" inside one email.
+    from utils.helpers import get_ist_now
+    stamp = get_ist_now().strftime("%d %b %Y, %I:%M %p")
+    subject = f"Open Trades Summary — {stamp} IST"
     body = f"""
     <html><body style="font-family:Arial,sans-serif;">
-    <h2>Open Trades — End-of-Day Summary</h2>
-    <p>These positions are still open at 3:40 PM. They are held until target /
-    stop-loss or their expiry date — no action needed.</p>
+    <h2>Open Trades Summary</h2>
+    <p>As of <b>{stamp} IST</b>. These positions are still open and are held until
+    target / stop-loss or their expiry date — no action needed.</p>
     <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
         <tr style="background:#f0f0f0;">
             <th>Stock</th><th>Mode</th><th>Current P&amp;L</th><th>Target</th><th>Loss Limit</th>
