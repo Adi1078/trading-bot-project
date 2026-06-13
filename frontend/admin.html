@@ -74,9 +74,12 @@
                     </div>
                     <div class="form-group">
                         <label>Notification Email</label>
-                        <input type="email" class="form-control" id="notificationEmail" placeholder="sigaramcapitals@gmail.com">
+                        <input type="email" class="form-control" id="notificationEmail" placeholder="you@example.com">
+                        <span style="color:#8b949e;font-size:11px;">All alerts and the end-of-day open-trades summary are sent here.</span>
                     </div>
                     <button class="btn btn-primary" onclick="saveTradeSettings()">Save Settings</button>
+                    <button class="btn btn-secondary" onclick="sendTestEmail()" id="testEmailBtn"
+                            style="margin-left:8px;">Send Test Email</button>
                 </div>
             </div>
         </div>
@@ -553,6 +556,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=10"></script>
+<script src="/static/js/admin.js?v=11"></script>
 </body>
 </html>

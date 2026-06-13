@@ -7,28 +7,73 @@ from config import EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
 logger = logging.getLogger(__name__)
 
 
-def _send_email(subject: str, body: str):
-    """Core function to send an email. All other functions call this."""
+def _resolve_receiver(to: str = None):
+    """
+    Pick where to send: an explicit recipient if given, otherwise the client's
+    configured notification email from settings, falling back to EMAIL_RECEIVER.
+    """
+    if to:
+        return to
+    try:
+        from database import SessionLocal
+        from models.settings import Settings
+        db = SessionLocal()
+        try:
+            s = db.query(Settings).first()
+            if s and s.notification_email:
+                return s.notification_email
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return EMAIL_RECEIVER
+
+
+def _send_email(subject: str, body: str, to: str = None):
+    """
+    Core function to send an email. All other functions call this.
+    Raises with a step-tagged message so callers can pinpoint where it broke:
+    [config] / [build] / [connect] / [login] / [send].
+    """
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
         logger.warning("Email credentials not configured, skipping email")
         return
 
+    receiver = _resolve_receiver(to)
+
+    # Build the message
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = EMAIL_SENDER
-        msg["To"] = EMAIL_RECEIVER
+        msg["To"] = receiver
         msg.attach(MIMEText(body, "html"))
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-
-        logger.info(f"Email sent: {subject}")
-
     except Exception as e:
-        logger.error(f"Failed to send email '{subject}': {str(e)}")
-        raise
+        logger.error(f"[build] Failed to build email '{subject}': {e}")
+        raise RuntimeError(f"[build] could not build message: {e}")
+
+    # Connect → login → send, each step tagged so the exact failure point is clear
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+            try:
+                server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            except smtplib.SMTPAuthenticationError as e:
+                logger.error(f"[login] SMTP auth failed for {EMAIL_SENDER}: {e}")
+                raise RuntimeError(
+                    "[login] Gmail rejected the sender login — check EMAIL_SENDER "
+                    "and that EMAIL_PASSWORD is a valid Gmail App Password (not the "
+                    f"normal account password). Detail: {e}"
+                )
+            try:
+                server.sendmail(EMAIL_SENDER, receiver, msg.as_string())
+            except smtplib.SMTPRecipientsRefused as e:
+                logger.error(f"[send] recipient refused {receiver}: {e}")
+                raise RuntimeError(f"[send] recipient address refused: {receiver} — {e}")
+    except (smtplib.SMTPConnectError, OSError, TimeoutError) as e:
+        logger.error(f"[connect] could not reach smtp.gmail.com:465 — {e}")
+        raise RuntimeError(f"[connect] could not reach Gmail SMTP (port 465 blocked?): {e}")
+
+    logger.info(f"Email sent to {receiver}: {subject}")
 
 
 def send_trade_opened_email(stock_name: str, futures_price: float, ce_strike: float,
@@ -119,6 +164,24 @@ def send_monthly_report_email(report_html: str, month: str):
     """Send monthly trade report via email."""
     subject = f"Monthly Trading Report: {month}"
     _send_email(subject, report_html)
+
+
+def send_test_email(to_email: str):
+    """Send a test email to confirm the email pipe works end-to-end."""
+    if not EMAIL_SENDER or not EMAIL_PASSWORD:
+        raise RuntimeError(
+            "Email credentials are not configured on the server "
+            "(EMAIL_SENDER / EMAIL_PASSWORD). No email can be sent."
+        )
+    subject = "Test Email — iAction Pulse Trading Bot"
+    body = """
+    <html><body style="font-family:Arial,sans-serif;">
+    <h2 style="color:#2ecc71;">Email is working ✅</h2>
+    <p>If you can read this, the trading bot can successfully send you emails —
+    including the end-of-day open-trades summary.</p>
+    </body></html>
+    """
+    _send_email(subject, body, to=to_email)
 
 
 def send_token_expiry_reminder():

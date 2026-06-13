@@ -52,5 +52,9 @@ def calculate_trade_pnl(futures_entry, futures_exit, ce_entry, ce_exit, pe_entry
 
 
 def is_safety_check_time():
+    # Fires in the 3:40–3:59 PM window (not a single exact minute) so the once-a-
+    # minute scheduler cadence can't skip past it. The "ran today" guard ensures it
+    # still only sends once. Note: this is AFTER market close (3:30 PM), so the
+    # scheduler must check it OUTSIDE the is_market_hours() gate.
     now = datetime.now(IST)
-    return now.hour == 15 and now.minute == 40
+    return now.hour == 15 and now.minute >= 40

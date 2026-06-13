@@ -126,6 +126,34 @@ def save_settings(request: SettingsRequest, db: Session = Depends(get_db)):
     return {"success": True}
 
 
+class TestEmailRequest(BaseModel):
+    email: str
+
+
+@router.post("/test-email")
+def test_email(request: TestEmailRequest, db: Session = Depends(get_db)):
+    """Send a test email to the given address to verify the email pipe works."""
+    if not request.email or "@" not in request.email:
+        return {"success": False, "error": "Enter a valid email address"}
+    try:
+        from notifications.email import send_test_email
+        send_test_email(request.email)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        # Full traceback in the logs so the exact failing line is recoverable;
+        # the step-tagged message ([login]/[connect]/[send]/...) goes to the UI.
+        log = Log(level="ERROR", message=f"Test email to {request.email} failed: {e}\n{tb}")
+        db.add(log)
+        db.commit()
+        return {"success": False, "error": str(e)}
+
+    log = Log(level="INFO", message=f"Test email sent to {request.email}")
+    db.add(log)
+    db.commit()
+    return {"success": True}
+
+
 @router.post("/clear-credentials")
 def clear_credentials(db: Session = Depends(get_db)):
     """Clear all broker credentials from the database."""

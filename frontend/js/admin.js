@@ -173,6 +173,28 @@ async function saveTradeSettings() {
     }
 }
 
+async function sendTestEmail() {
+    const email = document.getElementById("notificationEmail").value.trim();
+    if (!email) {
+        showToast("Enter an email address first", "error");
+        return;
+    }
+    const btn = document.getElementById("testEmailBtn");
+    btn.disabled = true;
+    btn.textContent = "Sending...";
+    const data = await api("/api/settings/test-email", {
+        method: "POST",
+        body: JSON.stringify({ email })
+    });
+    btn.disabled = false;
+    btn.textContent = "Send Test Email";
+    if (data.success) {
+        showToast(`Test email sent to ${email} — check inbox/spam`, "success");
+    } else {
+        showToast(data.error || "Failed to send test email", "error");
+    }
+}
+
 // ── Watchlist ─────────────────────────────────────────────────────────────────
 
 async function loadWatchlist() {
