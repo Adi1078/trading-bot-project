@@ -351,10 +351,10 @@ def test_monitor_closes_on_loss(mock_now, mock_broker):
 @patch("bot.trade_manager.fivepaisa")
 @patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 28, 12, 30))
 def test_monitor_closes_on_expiry_day(mock_now, mock_broker):
-    """At 12:00+ on the trade's own expiry date → force-closed with reason 'expiry'."""
+    """At/after the configured close time on the trade's expiry date → force-closed."""
     trade = make_open_trade()
     trade.expiry_date = "2026-05-28"
-    add(make_settings(), trade)
+    add(make_settings(trade_close_time="12:00"), trade)  # close time 12:00, now 12:30 -> close
     mock_broker.cancel_order.return_value = cancel_ok()
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
@@ -367,6 +367,45 @@ def test_monitor_closes_on_expiry_day(mock_now, mock_broker):
 
     assert trade.status == "closed"
     assert trade.close_reason == "expiry"
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 28, 12, 30))
+def test_monitor_does_not_close_before_close_time_on_expiry_day(mock_now, mock_broker):
+    """On the expiry date but BEFORE the configured close time → stays open."""
+    trade = make_open_trade()
+    trade.expiry_date = "2026-05-28"
+    add(make_settings(trade_close_time="15:00"), trade)  # close time 15:00, now 12:30 -> stay open
+    # Live prices that are NOT at target/SL, so only the expiry rule could close it.
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1120, 11.0, 10.0)
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.status == "open"   # not yet 15:00, must remain open
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 27, 15, 45))
+def test_monitor_does_not_close_before_expiry_day(mock_now, mock_broker):
+    """Before the expiry date — even past the close time — must NOT close on expiry rule."""
+    trade = make_open_trade()
+    trade.expiry_date = "2026-05-28"   # expiry is tomorrow
+    add(make_settings(trade_close_time="12:00"), trade)
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1120, 11.0, 10.0)
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.status == "open"   # not the expiry date yet
 
 
 @patch("bot.trade_manager.fivepaisa")

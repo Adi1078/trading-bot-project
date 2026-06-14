@@ -104,6 +104,7 @@ async function loadSettings() {
     document.getElementById("algoId").value = s.algo_id || "";
     document.getElementById("notificationEmail").value = s.notification_email || "";
     document.getElementById("tradeStartTime").value = s.trade_start_time || "09:30";
+    document.getElementById("tradeCloseTime").value = s.trade_close_time || "12:00";
     // Auto-login (TOTP) fields — client code shown in full; secret/PIN masked as placeholders
     if (document.getElementById("clientCode")) {
         document.getElementById("clientCode").value = s.client_code || "";
@@ -203,7 +204,8 @@ async function testAutoLogin() {
 async function saveTradeSettings() {
     const body = {
         notification_email: document.getElementById("notificationEmail").value.trim(),
-        trade_start_time: document.getElementById("tradeStartTime").value
+        trade_start_time: document.getElementById("tradeStartTime").value,
+        trade_close_time: document.getElementById("tradeCloseTime").value
     };
 
     const data = await api("/api/settings/save", {

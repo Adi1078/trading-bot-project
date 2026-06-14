@@ -24,6 +24,15 @@ def _round_tick(price):
     return round(round(price / 0.05) * 0.05, 2)
 
 
+def _parse_close_time(value):
+    """Parse an 'HH:MM' close time into (hour, minute). Falls back to 12:00."""
+    try:
+        h, m = str(value).split(":")
+        return int(h), int(m)
+    except (AttributeError, ValueError):
+        return 12, 0
+
+
 def _marketable_limit_price(ltp, side):
     """
     Limit price that behaves like a market order but caps slippage.
@@ -851,11 +860,15 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
 
     now = get_ist_now()
 
-    # Force close at 12:00 PM on the trade's own expiry date (the real contract
-    # expiry stored when the trade opened). There is no daily close time — a trade
-    # otherwise stays open until target/stop-loss/manual close.
+    # Force close at the configured close time, but ONLY on the trade's own expiry
+    # date (the real contract expiry stored when the trade opened). The
+    # `today_str >= trade.expiry_date` gate is what guarantees this NEVER closes on
+    # the same trading day — only on (or after) the expiry date. A trade otherwise
+    # stays open until target/stop-loss/manual close. There is no same-day close.
     today_str = now.strftime("%Y-%m-%d")
-    if trade.expiry_date and today_str >= trade.expiry_date and now.hour >= 12:
+    close_h, close_m = _parse_close_time(settings.trade_close_time)
+    if (trade.expiry_date and today_str >= trade.expiry_date
+            and (now.hour, now.minute) >= (close_h, close_m)):
         current_prices = _fetch_current_prices(db, settings, trade)
         _close_trade(db, settings, trade, reason="expiry", current_prices=current_prices)
         return
