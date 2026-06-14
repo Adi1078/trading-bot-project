@@ -64,6 +64,34 @@
             </div>
 
             <div class="card">
+                <div class="card-header"><h3>Automated Daily Login (TOTP)</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <p style="color:#8b949e;font-size:13px;line-height:1.6;margin-bottom:16px;">
+                        Fill these to let the bot connect the broker <b>automatically every trading day at 8:00 AM</b>
+                        — no manual login needed. When you change accounts, update the Client Code + TOTP Secret Key
+                        (and PIN if it differs). The <b>Connect Broker</b> button still works as a manual fallback.
+                    </p>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Client Code</label>
+                            <input type="text" class="form-control" id="clientCode" placeholder="e.g. 54324483">
+                        </div>
+                        <div class="form-group">
+                            <label>Login PIN</label>
+                            <input type="password" class="form-control" id="loginPin" placeholder="Enter Login PIN">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>TOTP Secret Key</label>
+                        <input type="password" class="form-control" id="totpSecret" placeholder="Enter TOTP Secret Key">
+                    </div>
+                    <button class="btn btn-primary" onclick="saveAutoLogin()">Save Auto-Login</button>
+                    <button class="btn btn-secondary" onclick="testAutoLogin()" id="testAutoLoginBtn"
+                            style="margin-left:8px;">Test Auto-Login Now</button>
+                </div>
+            </div>
+
+            <div class="card">
                 <div class="card-header"><h3>Trade Settings</h3></div>
                 <div class="card-body" style="padding:20px;">
                     <div class="form-row">
@@ -556,6 +584,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=12"></script>
+<script src="/static/js/admin.js?v=13"></script>
 </body>
 </html>

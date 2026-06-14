@@ -13,6 +13,8 @@ class Settings(Base):
     access_token = Column(String, nullable=True)
     client_code = Column(String, nullable=True)
     token_date = Column(String, nullable=True)
+    totp_secret = Column(String, nullable=True)   # TOTP secret for automated daily login
+    login_pin = Column(String, nullable=True)     # 5paisa login PIN for automated login
     notification_email = Column(String, nullable=True)
     trade_start_time = Column(String, default="09:30")
     trade_close_time = Column(String, default="12:00")

@@ -104,6 +104,12 @@ async function loadSettings() {
     document.getElementById("algoId").value = s.algo_id || "";
     document.getElementById("notificationEmail").value = s.notification_email || "";
     document.getElementById("tradeStartTime").value = s.trade_start_time || "09:30";
+    // Auto-login (TOTP) fields — client code shown in full; secret/PIN masked as placeholders
+    if (document.getElementById("clientCode")) {
+        document.getElementById("clientCode").value = s.client_code || "";
+        document.getElementById("totpSecret").placeholder = s.totp_secret || "Not set";
+        document.getElementById("loginPin").placeholder = s.login_pin || "Not set";
+    }
 }
 
 async function saveCredentials() {
@@ -152,6 +158,45 @@ async function clearCredentials() {
         loadSettings();
     } else {
         showToast(data.error || "Failed to clear credentials", "error");
+    }
+}
+
+async function saveAutoLogin() {
+    const body = {};
+    const clientCode = document.getElementById("clientCode").value.trim();
+    const totpSecret = document.getElementById("totpSecret").value.trim();
+    const loginPin = document.getElementById("loginPin").value.trim();
+
+    if (clientCode) body.client_code = clientCode;
+    if (totpSecret) body.totp_secret = totpSecret;
+    if (loginPin) body.login_pin = loginPin;
+
+    const data = await api("/api/settings/save", {
+        method: "POST",
+        body: JSON.stringify(body)
+    });
+
+    if (data.success) {
+        showToast("Auto-login settings saved", "success");
+        document.getElementById("totpSecret").value = "";
+        document.getElementById("loginPin").value = "";
+        loadSettings();
+    } else {
+        showToast(data.error || "Failed to save auto-login settings", "error");
+    }
+}
+
+async function testAutoLogin() {
+    const btn = document.getElementById("testAutoLoginBtn");
+    btn.disabled = true;
+    btn.textContent = "Testing...";
+    const data = await api("/api/settings/test-auto-login", { method: "POST" });
+    btn.disabled = false;
+    btn.textContent = "Test Auto-Login Now";
+    if (data.success) {
+        showToast(data.message, "success");
+    } else {
+        showToast(data.error || "Auto-login test failed", "error");
     }
 }
 

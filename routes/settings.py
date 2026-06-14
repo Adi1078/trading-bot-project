@@ -14,6 +14,9 @@ class SettingsRequest(BaseModel):
     encry_key: Optional[str] = None
     user_id: Optional[str] = None
     algo_id: Optional[str] = None
+    client_code: Optional[str] = None
+    totp_secret: Optional[str] = None
+    login_pin: Optional[str] = None
     notification_email: Optional[str] = None
     trade_start_time: Optional[str] = None
     trade_close_time: Optional[str] = None
@@ -46,6 +49,9 @@ def get_settings(db: Session = Depends(get_db)):
             "encry_key": _mask(settings.encry_key),
             "user_id": _mask(settings.user_id),
             "algo_id": settings.algo_id or "",
+            "client_code": settings.client_code or "",
+            "totp_secret": _mask(getattr(settings, "totp_secret", None)),
+            "login_pin": _mask(getattr(settings, "login_pin", None)),
             "notification_email": settings.notification_email or "",
             "trade_start_time": settings.trade_start_time or "09:30",
             "trade_close_time": settings.trade_close_time or "12:00",
@@ -84,6 +90,12 @@ def save_settings(request: SettingsRequest, db: Session = Depends(get_db)):
         settings.user_id = request.user_id
     if request.algo_id:
         settings.algo_id = request.algo_id
+    if request.client_code:
+        settings.client_code = request.client_code
+    if request.totp_secret:
+        settings.totp_secret = request.totp_secret
+    if request.login_pin:
+        settings.login_pin = request.login_pin
     if request.notification_email:
         settings.notification_email = request.notification_email
     if request.trade_start_time:
@@ -147,6 +159,49 @@ def test_email(request: TestEmailRequest, db: Session = Depends(get_db)):
         db.add(log)
         db.commit()
         return {"success": False, "error": str(e)}
+
+    log = Log(level="INFO", message=f"Test email sent to {request.email}")
+    db.add(log)
+    db.commit()
+    return {"success": True}
+
+
+@router.post("/test-auto-login")
+def test_auto_login(db: Session = Depends(get_db)):
+    """
+    Run the TOTP auto-login now with the saved credentials — verifies they work
+    and, on success, connects the broker (saves the token). Returns the precise
+    step-tagged error on failure so issues are easy to locate.
+    """
+    from datetime import date
+    s = db.query(Settings).first()
+    if not s or not s.totp_secret or not s.client_code or not s.login_pin:
+        return {"success": False, "error": "Save Client Code, TOTP Secret Key, and Login PIN first"}
+
+    try:
+        from broker.fivepaisa import connect_via_totp
+        result = connect_via_totp(s.totp_secret, s.client_code, s.login_pin)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        db.add(Log(level="ERROR", message=f"TOTP auto-login test crashed: {e}\n{tb}"))
+        db.commit()
+        return {"success": False, "error": str(e)}
+
+    if not result.get("success"):
+        db.add(Log(level="ERROR", message=f"TOTP auto-login test failed: {result.get('error')} | raw={result.get('raw')}"))
+        db.commit()
+        return {"success": False, "error": result.get("error")}
+
+    # Success — store the token (this doubles as a manual connect).
+    s.access_token = result.get("access_token", "")
+    if result.get("client_code"):
+        s.client_code = result["client_code"]
+    s.token_date = str(date.today())
+    name = result.get("client_name") or result.get("client_code")
+    db.add(Log(level="INFO", message=f"TOTP auto-login test SUCCESS — connected as {name}"))
+    db.commit()
+    return {"success": True, "message": f"Auto-login works ✓ Connected as {name}"}
 
     log = Log(level="INFO", message=f"Test email sent to {request.email}")
     db.add(log)
