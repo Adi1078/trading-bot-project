@@ -85,6 +85,90 @@ def get_access_token(request_token):
         return {"success": False, "error": str(e)}
 
 
+def _totp_request_token(client_code, totp_code, pin):
+    """
+    Log in via TOTP and return a RequestToken (same kind OAuth produces).
+    Endpoint/fields per the 5paisa TOTPLogin API.
+
+    On any failure, returns {success: False, error, traceback, raw} so the exact
+    cause (bad field name, wrong PIN, unexpected response shape) is recoverable.
+    """
+    import traceback
+    app_key, _, _, _, _ = _creds()
+    url = f"{BASE_URL}/TOTPLogin"
+    payload = {
+        "head": {"key": app_key},
+        "body": {
+            "Email_ID": client_code,   # 5paisa's TOTPLogin uses Email_ID for the client code
+            "TOTP": str(totp_code),
+            "PIN": str(pin),
+        }
+    }
+    raw = ""
+    try:
+        response = requests.post(url, json=payload, headers=_get_headers(), timeout=15)
+        raw = response.text  # capture the raw body BEFORE parsing, for diagnostics
+        response.raise_for_status()
+        data = response.json()
+
+        body = data.get("body", {}) or {}
+        # Success: a RequestToken present in the body.
+        request_token = body.get("RequestToken", "")
+        if request_token:
+            return {"success": True, "request_token": request_token}
+
+        error_msg = (
+            body.get("Message")
+            or data.get("head", {}).get("StatusDescription")
+            or "No RequestToken in TOTPLogin response"
+        )
+        logger.error(f"[totp_login] failed: {error_msg} | raw={raw}")
+        return {"success": False, "error": error_msg, "raw": raw}
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"[totp_login] exception: {e}\nraw={raw}\n{tb}")
+        return {"success": False, "error": str(e), "traceback": tb, "raw": raw}
+
+
+def connect_via_totp(totp_secret, client_code, pin):
+    """
+    Full automated login: generate the live TOTP from the secret, log in, and
+    exchange the resulting RequestToken for an access token. Returns the same
+    shape as get_access_token() so the caller can store the token identically.
+    Every failure path carries a step tag + traceback for exact diagnosis.
+    """
+    import traceback
+    if not totp_secret or not client_code or not pin:
+        missing = [n for n, v in [("TOTP secret", totp_secret), ("client code", client_code), ("PIN", pin)] if not v]
+        return {"success": False, "error": f"[config] missing: {', '.join(missing)}"}
+
+    # Step 1: generate the live TOTP code
+    try:
+        import pyotp
+        totp_code = pyotp.TOTP(totp_secret).now()
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"[totp_gen] {e}\n{tb}")
+        return {"success": False, "error": f"[totp_gen] could not generate code: {e}", "traceback": tb}
+
+    # Step 2: TOTP login -> RequestToken
+    login = _totp_request_token(client_code, totp_code, pin)
+    if not login["success"]:
+        return {
+            "success": False,
+            "error": f"[login] {login['error']}",
+            "traceback": login.get("traceback"),
+            "raw": login.get("raw"),
+        }
+
+    # Step 3: exchange RequestToken -> access token (existing, proven path)
+    result = get_access_token(login["request_token"])
+    if not result["success"]:
+        result["error"] = f"[access_token] {result.get('error')}"
+    return result
+
+
 def place_order(access_token, exchange, exchange_type, scrip_code, order_type,
                 price, qty, is_intraday, remote_order_id, stop_loss_price=0):
     """
