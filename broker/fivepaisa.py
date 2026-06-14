@@ -96,8 +96,10 @@ def _totp_request_token(client_code, totp_code, pin):
     import traceback
     app_key, _, _, _, _ = _creds()
     url = f"{BASE_URL}/TOTPLogin"
+    # TOTPLogin requires "Key" (capital K) in the head — unlike GetAccessToken,
+    # which also tolerates lowercase "key". Body fields per the 5paisa SDK.
     payload = {
-        "head": {"key": app_key},
+        "head": {"Key": app_key},
         "body": {
             "Email_ID": client_code,   # 5paisa's TOTPLogin uses Email_ID for the client code
             "TOTP": str(totp_code),
