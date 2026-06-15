@@ -821,7 +821,7 @@ def run_chartink_cycle(force: bool = False):
     not_in_watchlist = [s for s in symbols if s.upper() not in watchlist_names]
 
     if not_in_watchlist:
-        _log_simple("INFO", f"Chartink: skipping {len(not_in_watchlist)} stock(s) not in watchlist: {not_in_watchlist}")
+        _log_not_in_watchlist_once(not_in_watchlist)
 
     if not matched:
         return
@@ -858,6 +858,28 @@ def _log_simple(level: str, message: str):
     db = SessionLocal()
     try:
         db.add(Log(level=level, message=message))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _log_not_in_watchlist_once(stocks):
+    """
+    Log each screener stock that isn't in the watchlist AT MOST ONCE PER DAY.
+    The screener returns the same stocks every 5-minute cycle, so logging them
+    each cycle spams the log — we only log a stock the first time it's seen today.
+    """
+    today = str(get_ist_now().date())
+    db = SessionLocal()
+    try:
+        for s in stocks:
+            marker = f"Chartink: {s.upper()} not in watchlist — skipped"
+            already = db.query(Log).filter(
+                Log.message == marker,
+                Log.created_at >= today
+            ).count()
+            if not already:
+                db.add(Log(level="INFO", message=marker))
         db.commit()
     finally:
         db.close()

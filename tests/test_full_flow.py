@@ -698,7 +698,28 @@ def test_chartink_logs_stocks_not_in_watchlist():
                 trade_manager.run_chartink_cycle()
 
     db = TestSession()
-    log = db.query(Log).filter(Log.message.contains("not in watchlist")).first()
+    msgs = [l.message for l in db.query(Log).filter(Log.message.contains("not in watchlist")).all()]
     db.close()
-    assert log is not None
-    assert "RELIANCE" in log.message and "TCS" in log.message
+    # Each not-in-watchlist stock is logged once (its own line)
+    assert any("RELIANCE" in m for m in msgs)
+    assert any("TCS" in m for m in msgs)
+
+
+def test_chartink_not_in_watchlist_logged_once_per_day():
+    """A not-in-watchlist stock is logged only ONCE per day, even across cycles."""
+    db = TestSession()
+    add(make_settings(is_trading=True), Watchlist(stock_name="INFY", scrip_code="123"))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.run_webhook_trade"):
+            with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+                mock_scan.return_value = ["MAXHEALTH"]   # not in watchlist
+                trade_manager.run_chartink_cycle()       # cycle 1
+                trade_manager.run_chartink_cycle()       # cycle 2 (5 min later)
+                trade_manager.run_chartink_cycle()       # cycle 3
+
+    db = TestSession()
+    count = db.query(Log).filter(Log.message.contains("MAXHEALTH")).count()
+    db.close()
+    assert count == 1, f"MAXHEALTH should be logged once per day, got {count}"
