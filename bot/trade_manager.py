@@ -137,6 +137,20 @@ def _fetch_futures_price(settings, futures_scrip_code):
     return None
 
 
+def _fetch_spot_price(settings, scrip_code):
+    """Return the live equity spot price (LTP, ExchType 'C') for a stock, or None.
+    Used to compute a percent-based strike for the naked-CE option path."""
+    if not scrip_code:
+        return None
+    q = fivepaisa.get_market_quote(
+        settings.access_token,
+        [{"exchange": "N", "exchange_type": "C", "scrip_code": scrip_code}]
+    )
+    if q["success"] and q.get("quotes"):
+        return q["quotes"][0]["LastRate"]
+    return None
+
+
 def _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size):
     """
     Square off legs that were already placed when a later leg of a collar fails.
@@ -371,10 +385,23 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
 
 
 def _place_option_trade(db, settings, ft: FixedTrade):
-    """Sell CE at fixed strike only. No futures, no PE. Used for month_type = option."""
-
-    ce_strike = ft.strike_value
+    """
+    Sell CE only (no futures, no PE). Used for month_type = "option".
+    Supports BOTH fixed strike and percent (X% above live spot) — the same strike
+    logic as the collar/screener paths. (Previously this path ignored strike_type
+    and always treated the value as a literal strike, so "percent" silently broke.)
+    """
     expiry = get_current_expiry()
+
+    # Compute the CE strike. "fixed" uses the value directly; "percent" needs the
+    # live spot price (X% above spot), so fetch it first.
+    spot = None
+    if ft.strike_type == "percent":
+        spot = _fetch_spot_price(settings, ft.scrip_code)
+        if spot is None:
+            _save_log(db, "ERROR", f"{ft.stock_name}: could not get spot price for percent strike — skipping")
+            return
+    ce_strike = calculate_ce_strike(spot or 0, ft.strike_type, ft.strike_value, ft.stock_name)
 
     # Fetch option chain to get the real numeric scrip code for this CE strike
     chain_result = fivepaisa.get_option_chain(settings.access_token, ft.stock_name, expiry, ce_strike)

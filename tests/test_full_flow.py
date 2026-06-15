@@ -482,6 +482,38 @@ def test_safety_check_returns_count_for_manual_report(mock_broker):
     mock_email.assert_called_once()
 
 
+# ── Naked CE option trade — percent strike support ────────────────────────────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_percent_strike_places_limit_order(mock_broker):
+    """
+    Naked CE (month_type='option') with a PERCENT strike: the strike is computed
+    from the live spot, and the CE is placed as a real limit order (non-zero price)
+    — not a 0-price market order. Regression for the bug where the naked-CE path
+    ignored strike_type and treated the value as a literal strike.
+    """
+    add(make_settings(), make_watchlist(),
+        make_fixed_trade(strike_type="percent", strike_value=3, month_type="option"))
+
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)   # spot for percent calc
+    mock_broker.get_option_chain.return_value = chain_ok(1160)
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.place_order.return_value = order_ok(555)
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            trade_manager.run_fixed_trades()
+
+    assert mock_broker.place_order.called, "CE order should have been placed"
+    price_arg = mock_broker.place_order.call_args[0][5]   # 6th positional arg = price
+    assert price_arg > 0, f"CE must be a limit order (non-zero price), got {price_arg}"
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade is not None and trade.status == "open" and trade.month_type == "option"
+
+
 # ── Marketable Limit Price (tiered buffer) ────────────────────────────────────
 
 def test_marketable_limit_price_tiered_buffer():
