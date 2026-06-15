@@ -15,8 +15,15 @@ logger = logging.getLogger(__name__)
 # 5paisa rejects plain market orders ("Kindly place algo limit order"), so every
 # real order is placed as a *marketable limit* order: the price is set slightly in
 # the favourable direction of the live price so it fills immediately, while capping
-# worst-case slippage at this buffer.
-LIMIT_ORDER_BUFFER = 0.01  # 1%
+# the worst-case price at this buffer.
+#
+# Tiered by price: cheap instruments (<= ₹100, e.g. low-premium options) use a
+# wider 1% so the ₹0.05 tick rounding doesn't shrink the reach to zero; pricier
+# instruments (> ₹100, e.g. futures) use a tighter 0.5% since 0.5% there is
+# already several ticks of reach.
+LIMIT_ORDER_BUFFER_CHEAP = 0.01      # 1%  for LTP <= ₹100
+LIMIT_ORDER_BUFFER = 0.005           # 0.5% for LTP >  ₹100
+CHEAP_PRICE_THRESHOLD = 100
 
 
 def _round_tick(price):
@@ -45,7 +52,8 @@ def _marketable_limit_price(ltp, side):
         return 0
     if ltp <= 0:
         return 0
-    factor = (1 + LIMIT_ORDER_BUFFER) if side == "B" else (1 - LIMIT_ORDER_BUFFER)
+    buffer = LIMIT_ORDER_BUFFER_CHEAP if ltp <= CHEAP_PRICE_THRESHOLD else LIMIT_ORDER_BUFFER
+    factor = (1 + buffer) if side == "B" else (1 - buffer)
     return _round_tick(ltp * factor)
 
 

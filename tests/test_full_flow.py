@@ -482,6 +482,27 @@ def test_safety_check_returns_count_for_manual_report(mock_broker):
     mock_email.assert_called_once()
 
 
+# ── Marketable Limit Price (tiered buffer) ────────────────────────────────────
+
+def test_marketable_limit_price_tiered_buffer():
+    """Cheap (<=₹100) uses 1%; pricier (>₹100) uses 0.5%; rounded to ₹0.05 tick."""
+    mlp = trade_manager._marketable_limit_price
+
+    # Cheap (<= 100) → 1% buffer
+    assert mlp(5, "B") == 5.05      # 5 * 1.01
+    assert mlp(5, "S") == 4.95      # 5 * 0.99
+    assert mlp(100, "B") == 101.00  # boundary is "cheap" (<=100) → 1%
+
+    # Pricier (> 100) → 0.5% buffer
+    assert mlp(150, "B") == 150.75  # 150 * 1.005
+    assert mlp(150, "S") == 149.25  # 150 * 0.995
+    assert mlp(2800, "B") == 2814.00
+
+    # Bad / unavailable LTP → 0 (market fallback)
+    assert mlp(0, "B") == 0
+    assert mlp(None, "B") == 0
+
+
 # ── Chartink Scanner Tests ────────────────────────────────────────────────────
 
 def test_chartink_scan_matches_watchlist_and_trades():
