@@ -584,6 +584,39 @@ def test_chartink_skipped_when_no_watchlist():
             mock_scan.assert_not_called()
 
 
+def test_chartink_cycle_skips_stock_already_attempted_today():
+    """A stock attempted earlier today is filtered out — run_webhook_trade is NOT
+    called again for it (so no re-processing / no repeated skip log every cycle)."""
+    db = TestSession()
+    add(make_settings(is_trading=True),
+        Watchlist(stock_name="INFY", scrip_code="123"),
+        Log(level="INFO", message="Screener attempt recorded: INFY [LIVE]"))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.run_webhook_trade") as mock_webhook:
+            with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+                mock_scan.return_value = ["INFY"]
+                trade_manager.run_chartink_cycle()       # automatic run
+                mock_webhook.assert_not_called()         # filtered out, not re-tried
+
+
+def test_chartink_cycle_force_retries_attempted_stock():
+    """A manual forced run DOES retry a stock already attempted today."""
+    db = TestSession()
+    add(make_settings(is_trading=True),
+        Watchlist(stock_name="INFY", scrip_code="123"),
+        Log(level="INFO", message="Screener attempt recorded: INFY [LIVE]"))
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.run_webhook_trade") as mock_webhook:
+            with patch("bot.chartink_scanner.run_chartink_scan") as mock_scan:
+                mock_scan.return_value = ["INFY"]
+                trade_manager.run_chartink_cycle(force=True)
+                mock_webhook.assert_called_once_with("INFY", force=True)
+
+
 def test_manual_chartink_run_forces_trades():
     """The manual 'Run Chartink Trades' button passes force=True to each trade."""
     db = TestSession()

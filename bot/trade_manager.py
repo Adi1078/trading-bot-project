@@ -766,9 +766,14 @@ def run_chartink_cycle(force: bool = False):
     """
     One Chartink polling cycle. Called by the scheduler every few minutes
     (force=False) and by the manual "Run Chartink Trades" button (force=True).
-    Runs the screeners, keeps only symbols that are in the watchlist, and fires a
-    configured trade for each. run_webhook_trade() applies its own guards
-    (open-trade dedup, once-per-day attempted), so this is safe to call repeatedly.
+    Fires a configured trade for each watchlist match that hasn't already been
+    traded/attempted today.
+
+    Stocks already handled today are filtered out BEFORE the loop — those with an
+    open trade (always), and those already attempted today (unless forced). This
+    is what stops the cycle from re-processing, and re-logging "already attempted",
+    the same stocks every 5 minutes. When nothing new remains, the cycle stays
+    silent (no repeated summary spam).
     """
     db = SessionLocal()
     try:
@@ -776,6 +781,7 @@ def run_chartink_cycle(force: bool = False):
         if not settings or not settings.is_trading or not settings.access_token:
             return
         watchlist_names = {w.stock_name.upper() for w in db.query(Watchlist).all()}
+        is_paper = bool(getattr(settings, "webhook_is_paper", False))
     finally:
         db.close()
 
@@ -787,16 +793,31 @@ def run_chartink_cycle(force: bool = False):
     matched = [s for s in symbols if s.upper() in watchlist_names]
     not_in_watchlist = [s for s in symbols if s.upper() not in watchlist_names]
 
-    # Log the stocks the screeners found but that aren't in the watchlist, so it's
-    # clear in the logs why they weren't traded.
     if not_in_watchlist:
         _log_simple("INFO", f"Chartink: skipping {len(not_in_watchlist)} stock(s) not in watchlist: {not_in_watchlist}")
 
     if not matched:
         return
 
+    # Drop stocks already handled today so we don't re-process / re-log them every
+    # cycle: ones holding an open trade (always), and ones already attempted today
+    # (unless this is a manual forced run, which intentionally retries).
+    db = SessionLocal()
+    try:
+        open_names = {t.stock_name.upper() for t in db.query(Trade).filter(Trade.status == "open").all()}
+        matched = [
+            s for s in matched
+            if s.upper() not in open_names
+            and (force or not _screener_attempted_today(db, s, is_paper))
+        ]
+    finally:
+        db.close()
+
+    if not matched:
+        return   # everything already handled today — nothing new, stay quiet
+
     mode = " (manual)" if force else ""
-    _log_simple("INFO", f"Chartink scan{mode}: {len(symbols)} stocks found, {len(matched)} in watchlist: {matched}")
+    _log_simple("INFO", f"Chartink scan{mode}: {len(matched)} new stock(s) to trade: {matched}")
 
     for sym in matched:
         try:
