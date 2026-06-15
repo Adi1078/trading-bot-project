@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 _scheduler_running = False
 _scheduler_thread = None
-_last_totp_attempt = None   # throttles auto-login retries
+_last_totp_attempt = None          # throttles auto-login retries
+_already_connected_logged = None   # date we last logged the "already connected" skip
 
 # Auto-login fires from this time onward (well before the 9:15 AM market open).
 AUTO_LOGIN_FROM = (8, 0)
@@ -25,7 +26,7 @@ def _auto_login_if_needed(now):
     open with no manual action. Retries (throttled to every 2 min) until it
     succeeds. The manual Connect Broker button remains as a fallback.
     """
-    global _last_totp_attempt
+    global _last_totp_attempt, _already_connected_logged
     from utils.exchange_calendar import is_trading_day
 
     if not is_trading_day(now.date()):
@@ -40,8 +41,11 @@ def _auto_login_if_needed(now):
         # Need all three TOTP credentials; otherwise rely on manual Connect Broker.
         if not s or not s.totp_secret or not s.client_code or not s.login_pin:
             return
-        # Already connected for today — nothing to do.
+        # Already connected for today — log once (not every loop), then skip.
         if s.access_token and s.token_date == today:
+            if _already_connected_logged != today:
+                _save_log("INFO", "Scheduler: broker already connected for today — skipping auto-login")
+                _already_connected_logged = today
             return
         secret, client_code, pin = s.totp_secret, s.client_code, s.login_pin
     finally:
