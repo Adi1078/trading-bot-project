@@ -514,6 +514,26 @@ def test_naked_ce_percent_strike_places_limit_order(mock_broker):
     assert trade is not None and trade.status == "open" and trade.month_type == "option"
 
 
+# ── Traceback debugging on real-trade errors ─────────────────────────────────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_unexpected_error_logs_full_traceback(mock_broker):
+    """An unexpected exception during a fixed trade is logged WITH a full traceback
+    (so real-trade failures can be traced to the exact line)."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.side_effect = RuntimeError("boom-during-order")
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        trade_manager.run_fixed_trades()
+
+    db = TestSession()
+    err = db.query(Log).filter(Log.level == "ERROR", Log.message.contains("Traceback")).first()
+    db.close()
+    assert err is not None, "An error log with a traceback should exist"
+    assert "boom-during-order" in err.message       # the actual error
+    assert "Traceback (most recent call last)" in err.message  # the traceback
+
+
 # ── Marketable Limit Price (tiered buffer) ────────────────────────────────────
 
 def test_marketable_limit_price_tiered_buffer():

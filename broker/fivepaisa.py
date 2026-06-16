@@ -1,4 +1,5 @@
 import logging
+import traceback
 import requests
 
 logger = logging.getLogger(__name__)
@@ -81,8 +82,8 @@ def get_access_token(request_token):
         return {"success": False, "error": error_msg}
 
     except Exception as e:
-        logger.error(f"get_access_token exception: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"get_access_token exception: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
 def _totp_request_token(client_code, totp_code, pin):
@@ -222,8 +223,8 @@ def place_order(access_token, exchange, exchange_type, scrip_code, order_type,
         return {"success": False, "error": error_msg}
 
     except Exception as e:
-        logger.error(f"place_order exception for scrip {scrip_code}: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"place_order exception for scrip {scrip_code}: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
 def cancel_order(access_token, broker_order_id, scrip_code, exchange, exchange_type):
@@ -251,8 +252,8 @@ def cancel_order(access_token, broker_order_id, scrip_code, exchange, exchange_t
         return {"success": False, "error": _head_error(data)}
 
     except Exception as e:
-        logger.error(f"cancel_order exception for order {broker_order_id}: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"cancel_order exception for order {broker_order_id}: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
 def get_positions(access_token, client_code):
@@ -275,8 +276,8 @@ def get_positions(access_token, client_code):
         return {"success": False, "error": _head_error(data)}
 
     except Exception as e:
-        logger.error(f"get_positions exception: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"get_positions exception: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
 def get_order_status(access_token, client_code, exchange, remote_order_id):
@@ -308,8 +309,8 @@ def get_order_status(access_token, client_code, exchange, remote_order_id):
         return {"success": False, "error": _head_error(data)}
 
     except Exception as e:
-        logger.error(f"get_order_status exception for {remote_order_id}: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"get_order_status exception for {remote_order_id}: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
 def get_market_quote(access_token, scrip_list):
@@ -353,8 +354,8 @@ def get_market_quote(access_token, scrip_list):
         return {"success": False, "error": _head_error(data)}
 
     except Exception as e:
-        logger.error(f"get_market_quote exception: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"get_market_quote exception: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
 _raw_scrip_cache = None  # full scrip master with all columns, cached once per session

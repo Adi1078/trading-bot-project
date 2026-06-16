@@ -1,4 +1,5 @@
 import logging
+import traceback
 from database import SessionLocal
 from models.trade import Trade
 from models.fixed_trades import FixedTrade
@@ -77,6 +78,15 @@ def _save_log(db, level: str, message: str):
     db.add(log)
     db.commit()
     logger.info(f"[{level}] {message}")
+
+
+def _exc_detail(e) -> str:
+    """
+    Format an unexpected exception with its full traceback for logging, so a
+    real-trade failure can be traced to the exact line. Use in `except` blocks:
+    _save_log(db, "ERROR", f"... {_exc_detail(e)}").
+    """
+    return f"{e}\n{traceback.format_exc()}"
 
 
 def _get_settings(db):
@@ -198,7 +208,7 @@ def run_fixed_trades():
             try:
                 _process_fixed_trade(db, settings, ft)
             except Exception as e:
-                _save_log(db, "ERROR", f"Unexpected error for {ft.stock_name}: {str(e)}")
+                _save_log(db, "ERROR", f"Unexpected error for {ft.stock_name}: {_exc_detail(e)}")
     finally:
         db.close()
 
@@ -850,7 +860,7 @@ def run_chartink_cycle(force: bool = False):
         try:
             run_webhook_trade(sym, force=force)
         except Exception as e:
-            _log_simple("ERROR", f"Chartink: trade for {sym} failed - {str(e)}")
+            _log_simple("ERROR", f"Chartink: trade for {sym} failed - {_exc_detail(e)}")
 
 
 def _log_simple(level: str, message: str):
@@ -904,7 +914,7 @@ def monitor_open_trades():
             try:
                 _check_and_close_if_needed(db, settings, trade)
             except Exception as e:
-                _save_log(db, "ERROR", f"Monitor error for trade {trade.id} ({trade.stock_name}): {str(e)}")
+                _save_log(db, "ERROR", f"Monitor error for trade {trade.id} ({trade.stock_name}): {_exc_detail(e)}")
     finally:
         db.close()
 

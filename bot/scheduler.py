@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+import traceback
 from datetime import date
 from utils.helpers import get_ist_now, is_market_hours, is_safety_check_time
 from database import SessionLocal
@@ -208,14 +209,14 @@ def _run_loop():
                     from bot.trade_manager import run_fixed_trades
                     run_fixed_trades()
                 except Exception as e:
-                    _save_log("ERROR", f"Scheduler: run_fixed_trades failed - {str(e)}")
+                    _save_log("ERROR", f"Scheduler: run_fixed_trades failed - {e}\n{traceback.format_exc()}")
 
             # ── Monitor open trades every loop (~10s) ──
             try:
                 from bot.trade_manager import monitor_open_trades
                 monitor_open_trades()
             except Exception as e:
-                _save_log("ERROR", f"Scheduler: monitor_open_trades failed - {str(e)}")
+                _save_log("ERROR", f"Scheduler: monitor_open_trades failed - {e}\n{traceback.format_exc()}")
 
             # ── Position sync every 5 minutes ──
             if last_sync_time is None or (now - last_sync_time).seconds >= 300:
@@ -224,7 +225,7 @@ def _run_loop():
                     sync_positions()
                     last_sync_time = now
                 except Exception as e:
-                    _save_log("ERROR", f"Scheduler: position sync failed - {str(e)}")
+                    _save_log("ERROR", f"Scheduler: position sync failed - {e}\n{traceback.format_exc()}")
 
             # ── Chartink screener scan every 5 minutes (runs in background so it
             #    never blocks the monitor loop). run_chartink_cycle has its own guards. ──
@@ -234,10 +235,10 @@ def _run_loop():
                     threading.Thread(target=run_chartink_cycle, daemon=True).start()
                     last_chartink_scan = now
                 except Exception as e:
-                    _save_log("ERROR", f"Scheduler: chartink scan failed - {str(e)}")
+                    _save_log("ERROR", f"Scheduler: chartink scan failed - {e}\n{traceback.format_exc()}")
 
         except Exception as e:
-            _save_log("ERROR", f"Scheduler loop error: {str(e)}")
+            _save_log("ERROR", f"Scheduler loop error: {e}\n{traceback.format_exc()}")
 
         time.sleep(10)
 
