@@ -386,7 +386,9 @@ def _load_raw_scrip_master():
         logger.info(f"NSE F&O scrip master loaded: {len(rows)} option/future rows")
         return rows
     except Exception as e:
-        logger.error(f"Failed to load NSE F&O scrip master: {str(e)}")
+        # A silent failure here cascades: futures/option lookups return None and
+        # every trade gets skipped — so log the full traceback to pinpoint the cause.
+        logger.error(f"Failed to load NSE F&O scrip master: {e}", exc_info=True)
         return []
 
 
@@ -609,5 +611,5 @@ def get_scrip_master():
         return {"success": True, "instruments": instruments}
 
     except Exception as e:
-        logger.error(f"get_scrip_master exception: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"get_scrip_master exception: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
