@@ -128,15 +128,15 @@ def test_remote_order_ids_are_unique():
 
 # ── Exchange Calendar Tests ───────────────────────────────────────────────────
 
-def test_expiry_is_thursday():
-    """Expiry date should always be a Thursday (weekday 3)."""
+def test_expiry_is_tuesday():
+    """Fallback expiry should land on a Tuesday (weekday 1) — NSE's expiry day."""
     expiry = get_expiry_date(2026, 5)
-    assert expiry.weekday() == 3
+    assert expiry.weekday() == 1
 
-def test_expiry_is_last_thursday():
-    """May 2026 last Thursday should be May 28."""
+def test_expiry_is_last_tuesday():
+    """May 2026 last Tuesday should be May 26."""
     expiry = get_expiry_date(2026, 5)
-    assert expiry.day == 28
+    assert expiry.day == 26
 
 def test_next_expiry_is_after_current():
     """Next expiry should always be after current expiry."""

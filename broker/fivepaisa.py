@@ -431,6 +431,33 @@ def get_lot_size(stock_name, expiry_date):
     return None
 
 
+def get_monthly_expiries():
+    """
+    Return the real monthly F&O expiry dates straight from the NSE scrip master,
+    sorted ascending (list of datetime.date).
+
+    Futures (ScripType 'XX') are monthly contracts, so their distinct expiry dates
+    ARE the monthly expiry calendar — there is no need to compute "last Tuesday/
+    Thursday" ourselves (which silently breaks whenever NSE changes the expiry
+    weekday, as it did in 2025). Returns [] if the scrip master can't be loaded so
+    the caller can fall back to a computed estimate.
+    """
+    import datetime as _dt
+    rows = _load_raw_scrip_master()
+    expiries = set()
+    for row in rows:
+        if row.get("ScripType") != "XX":
+            continue
+        raw = (row.get("Expiry", "") or "")[:10]
+        if not raw:
+            continue
+        try:
+            expiries.add(_dt.date.fromisoformat(raw))
+        except ValueError:
+            continue
+    return sorted(expiries)
+
+
 def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     """
     Build option chain from scrip master + MarketSnapshot.
