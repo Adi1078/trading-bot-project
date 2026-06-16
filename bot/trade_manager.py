@@ -161,25 +161,24 @@ def _fetch_spot_price(settings, scrip_code):
     return None
 
 
-def _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size):
+def _alert_partial_fill(db, stock_name, placed_legs, failed_desc):
     """
-    Square off legs that were already placed when a later leg of a collar fails.
-    A half-built collar is an unhedged position with open risk, so if we can't
-    complete all three legs we reverse whatever we did place.
-    placed_legs: list of (scrip_code, entry_side, leg_name); we send the opposite side.
+    A leg failed AFTER one or more legs already went through. Per client
+    preference, the bot does NOT square off the filled legs — it leaves them as-is
+    and immediately emails the client so they can handle the exposed position
+    manually. (Replaces the old auto-unwind behaviour.)
+    placed_legs: list of (scrip_code, entry_side, leg_name) that DID go through.
     """
-    opposite = {"B": "S", "S": "B"}
-    for scrip_code, entry_side, leg in placed_legs:
-        side = opposite[entry_side]
-        price = _marketable_limit_price(_leg_ltp(settings, scrip_code), side)
-        result = fivepaisa.place_order(
-            settings.access_token, "N", "D", scrip_code, side, price, lot_size, False,
-            generate_remote_order_id(f"{stock_name}_{leg}_UNWIND")
-        )
-        if not result["success"]:
-            _save_log(db, "ERROR", f"{stock_name}: CRITICAL — could not unwind {leg} leg ({scrip_code}) after partial collar - {result['error']}. Check position manually!")
-        else:
-            _save_log(db, "WARNING", f"{stock_name}: unwound {leg} leg ({scrip_code}) after partial collar failure")
+    side_word = {"B": "Buy", "S": "Sell"}
+    filled = [f"{leg} ({side_word.get(side, side)}) — scrip {scrip}" for scrip, side, leg in placed_legs]
+    _save_log(db, "ERROR",
+              f"{stock_name}: PARTIAL FILL — open legs {[l for _, _, l in placed_legs]}, failed: {failed_desc}. "
+              f"NOT squared off (client handles manually); alert email sent.")
+    try:
+        from notifications.email import send_partial_fill_alert
+        send_partial_fill_alert(stock_name, filled, [failed_desc])
+    except Exception as e:
+        _save_log(db, "ERROR", f"{stock_name}: partial-fill alert email FAILED - {_exc_detail(e)}")
 
 
 # ─── Fixed Trades (Number 3) ───────────────────────────────────────────────────
@@ -346,8 +345,8 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         generate_remote_order_id(ft.stock_name + "_CE")
     )
     if not ce_result["success"]:
-        _save_log(db, "ERROR", f"{ft.stock_name}: CE sell order failed - {ce_result['error']}")
-        _unwind_placed_legs(db, settings, ft.stock_name, placed_legs, lot_size)
+        # Futures already went through — do NOT square it off; alert for manual handling.
+        _alert_partial_fill(db, ft.stock_name, placed_legs, f"CE sell: {ce_result['error']}")
         return
     placed_legs.append((ce_scrip_code, "S", "CE"))
 
@@ -357,8 +356,8 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         generate_remote_order_id(ft.stock_name + "_PE")
     )
     if not pe_result["success"]:
-        _save_log(db, "ERROR", f"{ft.stock_name}: PE buy order failed - {pe_result['error']}")
-        _unwind_placed_legs(db, settings, ft.stock_name, placed_legs, lot_size)
+        # Futures + CE already went through — do NOT square them off; alert for manual handling.
+        _alert_partial_fill(db, ft.stock_name, placed_legs, f"PE buy: {pe_result['error']}")
         return
 
     # Step 9: Save trade to database
@@ -761,7 +760,8 @@ def run_webhook_trade(stock_name: str, force: bool = False):
                     errors.append(f"PE: {pe_result['error']}")
                 _save_log(db, "ERROR", f"Screener {stock_name}: order(s) failed — {'; '.join(errors)}")
                 if placed_legs:
-                    _unwind_placed_legs(db, settings, stock_name, placed_legs, lot_size)
+                    # Some legs went through — do NOT square off; alert for manual handling.
+                    _alert_partial_fill(db, stock_name, placed_legs, '; '.join(errors))
                 return
 
             futures_order_id = str(futures_result["broker_order_id"])

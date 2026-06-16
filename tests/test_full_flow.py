@@ -514,6 +514,34 @@ def test_naked_ce_percent_strike_places_limit_order(mock_broker):
     assert trade is not None and trade.status == "open" and trade.month_type == "option"
 
 
+# ── Partial fill: no square-off, email the client ─────────────────────────────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_partial_fill_no_squareoff_and_emails(mock_broker):
+    """Futures fills but CE fails → bot does NOT square off the futures and sends
+    an immediate partial-fill alert email (client handles it manually)."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    # Futures accepted, CE rejected → partial
+    mock_broker.place_order.side_effect = [order_ok(111), {"success": False, "error": "RMS reject"}]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_partial_fill_alert") as mock_alert:
+            trade_manager.run_fixed_trades()
+
+    # Exactly 2 order calls (futures + CE). A square-off would have been a 3rd call.
+    assert mock_broker.place_order.call_count == 2, "must NOT place a square-off order"
+    mock_alert.assert_called_once()   # client alerted
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade is None   # partial collar is not saved as a normal trade
+
+
 # ── Traceback debugging on real-trade errors ─────────────────────────────────
 
 @patch("bot.trade_manager.fivepaisa")

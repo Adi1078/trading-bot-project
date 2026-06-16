@@ -76,6 +76,30 @@ def _send_email(subject: str, body: str, to: str = None):
     logger.info(f"Email sent to {receiver}: {subject}")
 
 
+def send_partial_fill_alert(stock_name: str, filled_legs: list, failed_legs: list):
+    """
+    URGENT alert: a trade only PARTIALLY executed (some legs filled, some failed).
+    The bot deliberately does NOT square anything off — the client handles the
+    exposed position manually. This email tells them what's open and what failed.
+    """
+    filled_html = "".join(f"<li>{x}</li>" for x in filled_legs) or "<li>—</li>"
+    failed_html = "".join(f"<li>{x}</li>" for x in failed_legs) or "<li>—</li>"
+    subject = f"⚠️ ACTION NEEDED: Partial trade on {stock_name}"
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;">
+    <h2 style="color:#e74c3c;">⚠️ Partial Trade — Manual Action Needed</h2>
+    <p><b>{stock_name}</b>: only part of the trade executed. The bot has
+    <b>NOT</b> squared anything off — please review and handle these positions
+    manually on 5paisa.</p>
+    <p><b>Legs that went through (OPEN positions):</b></p>
+    <ul>{filled_html}</ul>
+    <p><b>Legs that FAILED:</b></p>
+    <ul>{failed_html}</ul>
+    </body></html>
+    """
+    _send_email(subject, body)
+
+
 def send_trade_opened_email(stock_name: str, futures_price: float, ce_strike: float,
                              ce_premium: float, pe_strike: float, pe_premium: float):
     """Send email when a new trade position is opened."""
