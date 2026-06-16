@@ -207,12 +207,23 @@ def _confirm_fills(settings, db, stock_name, legs):
                 continue
 
             orders = result.get("orders", [])
-            status = orders[0].get("Status", "Unknown") if orders else "No status returned"
-            _save_log(db, "INFO", f"{stock_name}: [{leg_name}] order status = {status}")
-            if status == "Fully Executed":
+            if not orders:
+                _save_log(db, "INFO",
+                    f"{stock_name}: [{leg_name}] order status = no records (RemoteOrderID not found yet)")
+                unfilled.append(f"{leg_name} (no status record)")
+                continue
+            # 5paisa may return multiple history entries per order (e.g. Modified → Fully Executed).
+            # Check all entries — if any shows "Fully Executed" the order is filled.
+            if any(o.get("Status") == "Fully Executed" for o in orders):
+                final_status = "Fully Executed"
+            else:
+                final_status = orders[-1].get("Status", "Unknown")  # most recent entry last
+            _save_log(db, "INFO",
+                f"{stock_name}: [{leg_name}] order status = {final_status} ({len(orders)} record(s))")
+            if final_status == "Fully Executed":
                 filled.append(leg_name)
             else:
-                unfilled.append(f"{leg_name} (status: {status})")
+                unfilled.append(f"{leg_name} (status: {final_status})")
         except Exception as e:
             _save_log(db, "ERROR",
                 f"{stock_name}: [{leg_name}] order-status check crashed — {_exc_detail(e)}")
