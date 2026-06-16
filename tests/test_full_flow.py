@@ -120,6 +120,11 @@ def order_ok(oid):
     return {"success": True, "broker_order_id": oid}
 
 
+def fill_ok():
+    """Simulates get_order_status response: order fully executed on the exchange."""
+    return {"success": True, "orders": [{"Status": "Fully Executed"}]}
+
+
 def cancel_ok():
     return {"success": True}
 
@@ -139,10 +144,12 @@ def test_collar_trade_placed_and_saved(mock_broker):
     mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.get_lot_size.return_value = 400
     mock_broker.place_order.side_effect = [order_ok(111), order_ok(222), order_ok(333)]
+    mock_broker.get_order_status.return_value = fill_ok()  # all legs fully executed
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
         with patch("notifications.email.send_trade_opened_email"):
-            trade_manager.run_fixed_trades()
+            with patch("bot.trade_manager.time"):  # skip the 1-second sleep in tests
+                trade_manager.run_fixed_trades()
 
     db = TestSession()
     trade = db.query(Trade).first()
@@ -254,9 +261,11 @@ def test_webhook_trade_places_collar(mock_broker):
     mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.get_lot_size.return_value = 400
     mock_broker.place_order.side_effect = [order_ok(201), order_ok(202), order_ok(203)]
+    mock_broker.get_order_status.return_value = fill_ok()  # all legs fully executed
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
-        trade_manager.run_webhook_trade("ONGC")
+        with patch("bot.trade_manager.time"):  # skip the 1-second sleep in tests
+            trade_manager.run_webhook_trade("ONGC")
 
     db = TestSession()
     trade = db.query(Trade).first()
@@ -525,15 +534,20 @@ def test_partial_fill_no_squareoff_and_emails(mock_broker):
     mock_broker.get_option_chain.return_value = chain_ok(1150)
     mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.get_lot_size.return_value = 400
-    # Futures accepted, CE rejected → partial
-    mock_broker.place_order.side_effect = [order_ok(111), {"success": False, "error": "RMS reject"}]
+    # All 3 fired at once: Futures accepted, CE rejected, PE rejected
+    mock_broker.place_order.side_effect = [
+        order_ok(111),
+        {"success": False, "error": "RMS reject CE"},
+        {"success": False, "error": "RMS reject PE"},
+    ]
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
         with patch("notifications.email.send_partial_fill_alert") as mock_alert:
-            trade_manager.run_fixed_trades()
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
 
-    # Exactly 2 order calls (futures + CE). A square-off would have been a 3rd call.
-    assert mock_broker.place_order.call_count == 2, "must NOT place a square-off order"
+    # All 3 order calls fired at once — no square-off (no extra calls)
+    assert mock_broker.place_order.call_count == 3, "all 3 legs fired at once"
     mock_alert.assert_called_once()   # client alerted
 
     db = TestSession()

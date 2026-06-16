@@ -1,4 +1,5 @@
 import logging
+import time
 import traceback
 from database import SessionLocal
 from models.trade import Trade
@@ -181,6 +182,45 @@ def _alert_partial_fill(db, stock_name, placed_legs, failed_desc):
         _save_log(db, "ERROR", f"{stock_name}: partial-fill alert email FAILED - {_exc_detail(e)}")
 
 
+def _confirm_fills(settings, db, stock_name, legs):
+    """
+    Check fill status for each leg immediately after placement (1-second delay
+    gives the exchange time to process marketable-limit orders).
+
+    legs: list of (remote_order_id, leg_name)
+    Returns (filled_legs, unfilled_legs) where each item is a leg_name string.
+
+    Status "Fully Executed" → filled. Anything else (Pending, Rejected by Exch,
+    Cancelled, etc.) → unfilled → client must handle manually.
+    """
+    time.sleep(1)  # give the exchange 1 second to process
+    filled, unfilled = [], []
+    for remote_order_id, leg_name in legs:
+        try:
+            result = fivepaisa.get_order_status(
+                settings.access_token, settings.client_code, "N", remote_order_id
+            )
+            if not result["success"]:
+                _save_log(db, "ERROR",
+                    f"{stock_name}: [{leg_name}] order-status check failed — {result['error']}")
+                unfilled.append(f"{leg_name} (status-check failed: {result['error'][:80]})")
+                continue
+
+            orders = result.get("orders", [])
+            status = orders[0].get("Status", "Unknown") if orders else "No status returned"
+            _save_log(db, "INFO", f"{stock_name}: [{leg_name}] order status = {status}")
+            if status == "Fully Executed":
+                filled.append(leg_name)
+            else:
+                unfilled.append(f"{leg_name} (status: {status})")
+        except Exception as e:
+            _save_log(db, "ERROR",
+                f"{stock_name}: [{leg_name}] order-status check crashed — {_exc_detail(e)}")
+            unfilled.append(f"{leg_name} (status-check crashed)")
+
+    return filled, unfilled
+
+
 # ─── Fixed Trades (Number 3) ───────────────────────────────────────────────────
 
 def run_fixed_trades():
@@ -328,36 +368,52 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     contract_size = fivepaisa.get_lot_size(ft.stock_name, expiry) or 1
     lot_size = (ft.lot_size or 1) * contract_size
 
-    # Place all 3 orders as marketable limit orders (5paisa rejects market orders)
+    # Fire all 3 legs at once (same as screener path).
+    fut_remote_id = generate_remote_order_id(ft.stock_name + "_FUT")
+    ce_remote_id  = generate_remote_order_id(ft.stock_name + "_CE")
+    pe_remote_id  = generate_remote_order_id(ft.stock_name + "_PE")
+
     futures_result = fivepaisa.place_order(
         settings.access_token, "N", "D", futures_scrip_code, "B",
-        _marketable_limit_price(futures_price, "B"), lot_size, False,
-        generate_remote_order_id(ft.stock_name + "_FUT")
+        _marketable_limit_price(futures_price, "B"), lot_size, False, fut_remote_id
     )
-    if not futures_result["success"]:
-        _save_log(db, "ERROR", f"{ft.stock_name}: futures order failed - {futures_result['error']}")
-        return
-    placed_legs = [(futures_scrip_code, "B", "FUT")]
-
     ce_result = fivepaisa.place_order(
         settings.access_token, "N", "D", ce_scrip_code, "S",
-        _marketable_limit_price(ce_premium, "S"), lot_size, False,
-        generate_remote_order_id(ft.stock_name + "_CE")
+        _marketable_limit_price(ce_premium, "S"), lot_size, False, ce_remote_id
     )
-    if not ce_result["success"]:
-        # Futures already went through — do NOT square it off; alert for manual handling.
-        _alert_partial_fill(db, ft.stock_name, placed_legs, f"CE sell: {ce_result['error']}")
-        return
-    placed_legs.append((ce_scrip_code, "S", "CE"))
-
     pe_result = fivepaisa.place_order(
         settings.access_token, "N", "D", pe_scrip_code, "B",
-        _marketable_limit_price(pe_premium, "B"), lot_size, False,
-        generate_remote_order_id(ft.stock_name + "_PE")
+        _marketable_limit_price(pe_premium, "B"), lot_size, False, pe_remote_id
     )
-    if not pe_result["success"]:
-        # Futures + CE already went through — do NOT square them off; alert for manual handling.
-        _alert_partial_fill(db, ft.stock_name, placed_legs, f"PE buy: {pe_result['error']}")
+
+    # Check which were accepted by the broker (RMS-level check)
+    accepted, rejected_errors = [], []
+    for result, remote_id, leg in [
+        (futures_result, fut_remote_id, "FUT"),
+        (ce_result,      ce_remote_id,  "CE"),
+        (pe_result,      pe_remote_id,  "PE"),
+    ]:
+        if result["success"]:
+            accepted.append((remote_id, leg))
+        else:
+            rejected_errors.append(f"{leg}: {result['error']}")
+
+    if rejected_errors:
+        # At least one leg was rejected at broker level
+        _save_log(db, "ERROR", f"{ft.stock_name}: order(s) rejected — {'; '.join(rejected_errors)}")
+        if accepted:
+            # Some legs went through — alert client, do NOT square off
+            _alert_partial_fill(db, ft.stock_name,
+                [(None, "B" if l == "FUT" or l == "PE" else "S", l) for _, l in accepted],
+                '; '.join(rejected_errors))
+        return
+
+    # All 3 accepted — now confirm actual exchange fills via OrderStatus
+    filled, unfilled = _confirm_fills(settings, db, ft.stock_name, accepted)
+    if unfilled:
+        _alert_partial_fill(db, ft.stock_name,
+            [(None, "B" if l == "FUT" or l == "PE" else "S", l) for l in filled],
+            f"not fully executed: {', '.join(unfilled)}")
         return
 
     # Step 9: Save trade to database
@@ -727,22 +783,25 @@ def run_webhook_trade(stock_name: str, force: bool = False):
 
         futures_order_id = ce_order_id = pe_order_id = None
         if not is_paper:
+            # Capture remote IDs before placement — same IDs reused for fill-confirmation
+            fut_remote_id = generate_remote_order_id(stock_name + "_FUT")
+            ce_remote_id  = generate_remote_order_id(stock_name + "_CE")
+            pe_remote_id  = generate_remote_order_id(stock_name + "_PE")
+
             futures_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", futures_scrip_code, "B",
-                _marketable_limit_price(futures_price, "B"), lot_size, False,
-                generate_remote_order_id(stock_name + "_FUT")
+                _marketable_limit_price(futures_price, "B"), lot_size, False, fut_remote_id
             )
             ce_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", ce_scrip_code, "S",
-                _marketable_limit_price(ce_premium, "S"), lot_size, False,
-                generate_remote_order_id(stock_name + "_CE")
+                _marketable_limit_price(ce_premium, "S"), lot_size, False, ce_remote_id
             )
             pe_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", pe_scrip_code, "B",
-                _marketable_limit_price(pe_premium, "B"), lot_size, False,
-                generate_remote_order_id(stock_name + "_PE")
+                _marketable_limit_price(pe_premium, "B"), lot_size, False, pe_remote_id
             )
 
+            # Step 1: broker-level acceptance (RMS) check
             if not all([futures_result["success"], ce_result["success"], pe_result["success"]]):
                 errors = []
                 placed_legs = []
@@ -760,8 +819,19 @@ def run_webhook_trade(stock_name: str, force: bool = False):
                     errors.append(f"PE: {pe_result['error']}")
                 _save_log(db, "ERROR", f"Screener {stock_name}: order(s) failed — {'; '.join(errors)}")
                 if placed_legs:
-                    # Some legs went through — do NOT square off; alert for manual handling.
                     _alert_partial_fill(db, stock_name, placed_legs, '; '.join(errors))
+                return
+
+            # Step 2: exchange fill confirmation — same IDs that were sent to the broker
+            _filled, _unfilled = _confirm_fills(settings, db, stock_name, [
+                (fut_remote_id, "FUT"),
+                (ce_remote_id,  "CE"),
+                (pe_remote_id,  "PE"),
+            ])
+            if _unfilled:
+                _alert_partial_fill(db, stock_name,
+                    [(None, "B" if l in ("FUT", "PE") else "S", l) for l in _filled],
+                    f"not fully executed: {', '.join(_unfilled)}")
                 return
 
             futures_order_id = str(futures_result["broker_order_id"])
