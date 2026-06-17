@@ -524,6 +524,12 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         _save_log(db, "ERROR", f"{ft.stock_name}: CE option has no scrip code in chain response")
         return
 
+    if not ce_premium or ce_premium <= 0:
+        _save_log(db, "ERROR",
+            f"{ft.stock_name}: CE strike {ce_strike} has no premium (0) — strike is "
+            f"illiquid / too far OTM; check the strike settings for this stock")
+        return
+
     # Step 5: Find best PE strike (premium must be lower than CE premium)
     # Steps 5-7: pick the highest-premium PE below the CE premium that is actually
     # tradeable (skips zero-volume strikes + confirms live offers via market depth),
@@ -634,6 +640,13 @@ def _place_option_trade(db, settings, ft: FixedTrade):
     # real order (previously this path ignored ft.is_trade and always traded live).
     is_paper = not ft.is_trade
     ce_premium = ce_option.get("LastRate", 0)
+
+    if not ce_premium or ce_premium <= 0:
+        _save_log(db, "ERROR",
+            f"{ft.stock_name}: CE strike {ce_strike} has no premium (0) — strike is "
+            f"illiquid / too far OTM; check the strike settings for this stock")
+        return
+
     ce_order_id = None
     if not is_paper:
         ce_result = fivepaisa.place_order(
@@ -857,6 +870,12 @@ def run_webhook_trade(stock_name: str, force: bool = False):
 
         if not ce_scrip_code:
             _save_log(db, "ERROR", f"Webhook {stock_name}: CE option has no scrip code")
+            return
+
+        if not ce_premium or ce_premium <= 0:
+            _save_log(db, "ERROR",
+                f"Webhook {stock_name}: CE strike {ce_strike} has no premium (0) — strike is "
+                f"illiquid / too far OTM; check the strike settings for this stock")
             return
 
         # ── Option trade: naked CE sell only ────────────────────────────────

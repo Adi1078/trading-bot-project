@@ -20,14 +20,20 @@ def calculate_ce_strike(futures_price, strike_type, strike_value, stock_name):
     """
     Calculate the CE strike to sell.
     - strike_type 'fixed'   -> use strike_value directly as the strike price
-    - strike_type 'percent' -> futures_price + strike_value%, rounded up to nearest strike
+    - strike_type 'percent' -> the raw futures_price + strike_value% target.
+
+    For 'percent' we deliberately return the *raw* target and do NOT round it to a
+    guessed strike interval. get_option_chain() snaps this to the nearest real
+    exchange strike at or above the target, so it always lands on a strike that
+    actually exists and trades — regardless of the stock's price/strike spacing.
+    The old hardcoded-interval rounding broke low-priced stocks (e.g. PNB ~₹109,
+    +2% should be ~₹112.5 but rounded to ₹150, a dead far-OTM strike with no
+    premium). stock_name is kept in the signature for callers/back-compat.
     """
     if strike_type == "fixed":
         return float(strike_value)
 
-    interval = get_strike_interval(stock_name)
-    raw_strike = futures_price * (1 + strike_value / 100)
-    return float(round_strike_up(raw_strike, interval))
+    return float(futures_price * (1 + strike_value / 100))
 
 
 def _is_liquid(opt):

@@ -584,8 +584,12 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     if not quote_result["success"]:
         return {"success": False, "error": f"MarketSnapshot failed for options: {quote_result['error']}"}
 
-    # Keep the full quote per scrip so we can read both LastRate and TotalQty (volume),
+    # Keep the full quote per scrip so we can read both LastRate and the day volume,
     # the latter being a free liquidity signal used to skip dead/illiquid strikes.
+    # NOTE: the live MarketSnapshot response names the day-volume field "Volume"
+    # (NOT "TotalQty" as the docs suggested) — reading "TotalQty" always returned 0,
+    # which silently made every strike look illiquid. We read "Volume" but keep the
+    # downstream key "TotalQty" so callers don't need to change.
     quotes = {str(q["ScripCode"]): q for q in quote_result["quotes"]}
 
     def _q(scrip_code, field, default=0):
@@ -598,7 +602,7 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
             "CPType": "CE",
             "Scripcode": ce_instrument["ScripCode"],
             "LastRate": _q(ce_instrument["ScripCode"], "LastRate"),
-            "TotalQty": _q(ce_instrument["ScripCode"], "TotalQty")
+            "TotalQty": _q(ce_instrument["ScripCode"], "Volume")
         })
     for pe in pe_instruments:
         option_chain.append({
@@ -606,7 +610,7 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
             "CPType": "PE",
             "Scripcode": pe["ScripCode"],
             "LastRate": _q(pe["ScripCode"], "LastRate"),
-            "TotalQty": _q(pe["ScripCode"], "TotalQty")
+            "TotalQty": _q(pe["ScripCode"], "Volume")
         })
 
     return {"success": True, "option_chain": option_chain, "expiry": actual_expiry}

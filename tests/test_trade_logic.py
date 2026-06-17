@@ -26,15 +26,21 @@ def test_fixed_ce_strike():
     result = calculate_ce_strike(1126.3, "fixed", 1150, "INFY")
     assert result == 1150.0
 
-def test_percent_ce_strike_cholafin():
-    """CHOLAFIN at 1580 + 2% = 1611.6, rounds up to next 50 = 1650."""
+def test_percent_ce_strike_returns_raw_target():
+    """
+    'percent' now returns the RAW target (spot + X%), not a hardcoded-interval round.
+    get_option_chain snaps this to the nearest real exchange strike >= target, which
+    fixes low-priced stocks (PNB ₹109 +2% = ₹111.18 → real strike 112.5, not 150).
+    CHOLAFIN at 1580 + 2% = 1611.6.
+    """
     result = calculate_ce_strike(1580, "percent", 2, "CHOLAFIN")
-    assert result == 1650.0
+    assert result == pytest.approx(1611.6)
 
-def test_percent_ce_strike_nifty():
-    """NIFTY at 23571 + 3% = 24278.13, rounds up to next 50 = 24300."""
-    result = calculate_ce_strike(23571, "percent", 3, "NIFTY")
-    assert result == 24300.0
+def test_percent_ce_strike_low_priced_stock():
+    """PNB ~₹108.96 + 2% should be ~₹111.14 — NOT rounded up to a dead ₹150 strike."""
+    result = calculate_ce_strike(108.96, "percent", 2, "PNB")
+    assert result == pytest.approx(111.1392)
+    assert result < 115   # must stay near spot, not jump to 150
 
 def test_nifty_strike_interval():
     """NIFTY strike interval should be 50."""
