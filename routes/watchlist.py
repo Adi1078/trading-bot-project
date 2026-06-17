@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models.watchlist import Watchlist
 from models.log import Log
-from broker.fivepaisa import get_scrip_master
+from broker.fivepaisa import get_scrip_master, _load_raw_scrip_master
 
 router = APIRouter()
 
@@ -86,17 +86,16 @@ def search_stocks(query: str):
 
     query_lower = query.lower()
 
-    # Identify which stocks have F&O (futures/options) available in the scrip master.
-    # In the 5paisa scrip master, derivative contracts have ExchType "D" and their
-    # underlying is the first token of the Symbol, e.g. "INFY 27 Mar 2025 CE 2840.00"
-    # -> "INFY". A stock has F&O if its symbol appears as such an underlying.
-    fo_symbols = set()
-    for inst in result["instruments"]:
-        if inst.get("ExchType") == "D":
-            sym = inst.get("Symbol", "")
-            underlying = sym.split(" ")[0].upper() if sym else ""
-            if underlying:
-                fo_symbols.add(underlying)
+    # Identify which stocks have F&O (futures/options) available. We read this from
+    # the NSE F&O scrip master (the SAME source the option chain + futures lookups
+    # use), keyed by SymbolRoot. The website CSV behind get_scrip_master omits some
+    # F&O names (e.g. RVNL had its equity row but zero derivative rows there), which
+    # wrongly hid tradeable stocks from this search.
+    fo_symbols = {
+        (row.get("SymbolRoot", "") or "").upper()
+        for row in _load_raw_scrip_master()
+        if row.get("SymbolRoot")
+    }
 
     # Cash equity series only (ExchType "C", Series "EQ"), AND must have F&O available.
     eq = [
