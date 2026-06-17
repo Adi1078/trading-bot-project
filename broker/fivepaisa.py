@@ -358,6 +358,44 @@ def get_market_quote(access_token, scrip_list):
         return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
+def get_market_depth(access_token, client_code, exchange, exchange_type, scrip_code):
+    """
+    Fetch the level-5 order book (best 5 bids/asks) for a single scrip via the
+    official V2/MarketDepth endpoint.
+
+    Returns {"success": True, "depth": [ {BbBuySellFlag, Price, Quantity, NumberOfOrders}, ... ]}.
+    BbBuySellFlag: 66 = bid (buy side), 83 = ask (sell side / offers). We use this to
+    confirm a contract is actually tradeable before sending an order — a far-OTM
+    option with no offers gets rejected by 5paisa as an "illiquid contract".
+    """
+    app_key, _, _, _, _ = _creds()
+    url = f"{BASE_URL}/V2/MarketDepth"
+    payload = {
+        "head": {"key": app_key},
+        "body": {
+            "ClientCode": client_code,
+            "Exchange": exchange,
+            "ExchangeType": exchange_type,
+            "ScripCode": str(scrip_code),
+            "ScripData": ""
+        }
+    }
+    try:
+        response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if _head_ok(data):
+            return {"success": True, "depth": data.get("body", {}).get("MarketDepthData", [])}
+
+        logger.error(f"get_market_depth failed for scrip {scrip_code}: {_head_error(data)}")
+        return {"success": False, "error": _head_error(data)}
+
+    except Exception as e:
+        logger.error(f"get_market_depth exception for scrip {scrip_code}: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
+
+
 _raw_scrip_cache = None  # full scrip master with all columns, cached once per session
 _option_cache = {}      # option instruments by (stock, expiry_str)
 
@@ -546,7 +584,12 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     if not quote_result["success"]:
         return {"success": False, "error": f"MarketSnapshot failed for options: {quote_result['error']}"}
 
-    quotes = {str(q["ScripCode"]): q["LastRate"] for q in quote_result["quotes"]}
+    # Keep the full quote per scrip so we can read both LastRate and TotalQty (volume),
+    # the latter being a free liquidity signal used to skip dead/illiquid strikes.
+    quotes = {str(q["ScripCode"]): q for q in quote_result["quotes"]}
+
+    def _q(scrip_code, field, default=0):
+        return quotes.get(str(scrip_code), {}).get(field, default)
 
     option_chain = []
     if ce_instrument:
@@ -554,14 +597,16 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
             "StrikeRate": ce_instrument["StrikeRate"],
             "CPType": "CE",
             "Scripcode": ce_instrument["ScripCode"],
-            "LastRate": quotes.get(str(ce_instrument["ScripCode"]), 0)
+            "LastRate": _q(ce_instrument["ScripCode"], "LastRate"),
+            "TotalQty": _q(ce_instrument["ScripCode"], "TotalQty")
         })
     for pe in pe_instruments:
         option_chain.append({
             "StrikeRate": pe["StrikeRate"],
             "CPType": "PE",
             "Scripcode": pe["ScripCode"],
-            "LastRate": quotes.get(str(pe["ScripCode"]), 0)
+            "LastRate": _q(pe["ScripCode"], "LastRate"),
+            "TotalQty": _q(pe["ScripCode"], "TotalQty")
         })
 
     return {"success": True, "option_chain": option_chain, "expiry": actual_expiry}

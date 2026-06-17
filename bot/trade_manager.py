@@ -8,7 +8,7 @@ from models.watchlist import Watchlist
 from models.settings import Settings
 from models.log import Log
 from broker import fivepaisa
-from bot.strike_calculator import calculate_ce_strike, find_pe_strike, validate_premium_condition
+from bot.strike_calculator import calculate_ce_strike, find_pe_strike, find_pe_candidates
 from utils.exchange_calendar import get_current_expiry, get_next_expiry
 from utils.helpers import generate_remote_order_id, calculate_trade_pnl, get_ist_now
 
@@ -162,26 +162,6 @@ def _fetch_spot_price(settings, scrip_code):
     return None
 
 
-def _alert_partial_fill(db, stock_name, placed_legs, failed_desc):
-    """
-    A leg failed AFTER one or more legs already went through. Per client
-    preference, the bot does NOT square off the filled legs — it leaves them as-is
-    and immediately emails the client so they can handle the exposed position
-    manually. (Replaces the old auto-unwind behaviour.)
-    placed_legs: list of (scrip_code, entry_side, leg_name) that DID go through.
-    """
-    side_word = {"B": "Buy", "S": "Sell"}
-    filled = [f"{leg} ({side_word.get(side, side)}) — scrip {scrip}" for scrip, side, leg in placed_legs]
-    _save_log(db, "ERROR",
-              f"{stock_name}: PARTIAL FILL — open legs {[l for _, _, l in placed_legs]}, failed: {failed_desc}. "
-              f"NOT squared off (client handles manually); alert email sent.")
-    try:
-        from notifications.email import send_partial_fill_alert
-        send_partial_fill_alert(stock_name, filled, [failed_desc])
-    except Exception as e:
-        _save_log(db, "ERROR", f"{stock_name}: partial-fill alert email FAILED - {_exc_detail(e)}")
-
-
 def _confirm_fills(settings, db, stock_name, legs):
     """
     Check fill status for each leg immediately after placement (1-second delay
@@ -230,6 +210,177 @@ def _confirm_fills(settings, db, stock_name, legs):
             unfilled.append(f"{leg_name} (status-check crashed)")
 
     return filled, unfilled
+
+
+def _pick_liquid_pe(db, settings, stock_name, option_chain, ce_premium, max_checks=6):
+    """
+    Pick the highest-premium PE (still below the CE premium) that is actually
+    TRADEABLE, so the buy never gets rejected as an "illiquid contract".
+
+    Two-stage liquidity guard:
+      1. Drop strikes with zero day volume / zero premium — free, uses the option
+         chain we already fetched (TotalQty + LastRate).
+      2. For the surviving candidates (best premium first), confirm via the level-5
+         Market Depth order book that there are live SELL-side offers (BbBuySellFlag
+         83, qty > 0) to buy from; take the first that passes.
+
+    Only the PE leg uses this — futures and the CE sell are unchanged.
+    Returns (pe_strike, pe_premium, pe_scrip_code) or (None, None, None).
+    """
+    pe_inputs = [
+        {"strike": o["StrikeRate"], "premium": o.get("LastRate", 0),
+         "type": "PE", "volume": o.get("TotalQty", 0)}
+        for o in option_chain if o.get("CPType") == "PE"
+    ]
+    candidates = find_pe_candidates(pe_inputs, ce_premium)
+    if not candidates:
+        _save_log(db, "ERROR",
+            f"{stock_name}: no liquid PE strike below CE premium {ce_premium} (all zero-volume/illiquid)")
+        return None, None, None
+
+    scrip_by_strike = {
+        o["StrikeRate"]: str(o.get("Scripcode", ""))
+        for o in option_chain if o.get("CPType") == "PE"
+    }
+
+    for cand in candidates[:max_checks]:
+        strike = cand["strike"]
+        scrip_code = scrip_by_strike.get(strike, "")
+        if not scrip_code:
+            continue
+        depth = fivepaisa.get_market_depth(
+            settings.access_token, settings.client_code, "N", "D", scrip_code)
+        if not depth["success"]:
+            _save_log(db, "INFO",
+                f"{stock_name}: PE {strike} skipped — depth check failed ({depth['error'][:80]})")
+            continue
+        # BbBuySellFlag 83 = sell-side/offers (66 = bids). We BUY the PE, so we need
+        # offers to lift. Flag may arrive as int/float/string — compare numerically.
+        def _is_offer(d):
+            try:
+                return int(float(d.get("BbBuySellFlag", 0))) == 83 and (d.get("Quantity") or 0) > 0
+            except (ValueError, TypeError):
+                return False
+        offers = [d for d in depth["depth"] if _is_offer(d)]
+        if offers:
+            _save_log(db, "INFO",
+                f"{stock_name}: PE {strike} confirmed tradeable — {len(offers)} ask level(s), premium {cand['premium']}")
+            return strike, cand["premium"], scrip_code
+        _save_log(db, "INFO",
+            f"{stock_name}: PE {strike} skipped — no live sell-side offers (illiquid)")
+
+    _save_log(db, "ERROR",
+        f"{stock_name}: no tradeable PE confirmed via market depth below CE premium {ce_premium}")
+    return None, None, None
+
+
+def _finalize_live_collar(db, settings, *, stock_name, trade_source, fixed_trade_id,
+                          month_type, lot_size, expiry_date, profit_target, loss_limit,
+                          legs, ce_strike=None, pe_strike=None):
+    """
+    Save a real (live) collar trade tracking ONLY the legs that actually opened.
+
+    For each attempted leg we check two things: (1) broker RMS acceptance from the
+    place_order result and (2) the real exchange fill via OrderStatus. We then save
+    a Trade populated with ONLY the confirmed-open legs — any leg that was rejected
+    or never filled is left empty, exactly like a naked-CE trade. This means a
+    partial fill is no longer thrown away: the legs that DID open are tracked
+    normally (live P&L, profit-target / stop / expiry close), and the client is
+    emailed about the leg(s) that didn't open so they can add them manually.
+
+    legs: list of dicts, each {"name","side","scrip","entry","result","remote"}.
+          "result" is the place_order dict; "remote" the RemoteOrderID used.
+    Returns the saved Trade, or None if nothing opened.
+    """
+    # 1. Broker (RMS) acceptance — split into accepted vs rejected.
+    accepted, problems = [], []
+    for lg in legs:
+        if lg["result"]["success"]:
+            accepted.append((lg["remote"], lg["name"]))
+        else:
+            problems.append(f"{lg['name']}: {lg['result']['error']}")
+
+    # 2. Real exchange fill confirmation for the accepted legs.
+    filled = []
+    if accepted:
+        filled, unfilled = _confirm_fills(settings, db, stock_name, accepted)
+        if unfilled:
+            problems.append(f"not fully executed: {', '.join(unfilled)}")
+
+    if not filled:
+        _save_log(db, "ERROR",
+            f"{stock_name}: no legs opened — {'; '.join(problems) or 'unknown reason'}. Nothing to track.")
+        if problems:
+            try:
+                from notifications.email import send_partial_fill_alert
+                send_partial_fill_alert(stock_name, [], problems)
+            except Exception as e:
+                _save_log(db, "ERROR", f"{stock_name}: partial-fill alert email FAILED - {_exc_detail(e)}")
+        return None
+
+    by = {lg["name"]: lg for lg in legs}
+
+    def _field(name, key):
+        return by[name][key] if (name in filled and name in by) else None
+
+    def _order_id(name):
+        return str(by[name]["result"]["broker_order_id"]) if (name in filled and name in by) else None
+
+    trade = Trade(
+        stock_name=stock_name.upper(),
+        trade_source=trade_source,
+        fixed_trade_id=fixed_trade_id,
+        is_paper_trade=False,
+        month_type=month_type,
+        lot_size=lot_size,
+        futures_scrip_code=_field("FUT", "scrip"),
+        ce_scrip_code=_field("CE", "scrip"),
+        pe_scrip_code=_field("PE", "scrip"),
+        futures_broker_order_id=_order_id("FUT"),
+        ce_broker_order_id=_order_id("CE"),
+        pe_broker_order_id=_order_id("PE"),
+        futures_entry_price=_field("FUT", "entry"),
+        ce_entry_price=_field("CE", "entry"),
+        pe_entry_price=_field("PE", "entry"),
+        expiry_date=expiry_date,
+        profit_target=profit_target,
+        loss_limit=loss_limit,
+        status="open",
+    )
+    db.add(trade)
+
+    if problems:
+        _save_log(db, "ERROR",
+            f"{stock_name}: PARTIAL FILL — tracking open legs {filled}; NOT opened: {'; '.join(problems)}. "
+            f"The open legs are now tracked normally; client adds the missing leg(s) manually. Alert email sent.")
+    else:
+        _save_log(db, "INFO",
+            f"{stock_name}: collar placed (LIVE) — legs {filled}, "
+            f"Futures@{_field('FUT', 'entry')}, CE {ce_strike}@{_field('CE', 'entry')} sold, "
+            f"PE {pe_strike}@{_field('PE', 'entry')} bought, lot {lot_size}")
+    db.commit()
+
+    # Notify: partial → action-needed alert; full → trade-opened confirmation.
+    if problems:
+        side_word = {"B": "Buy", "S": "Sell"}
+        filled_desc = [
+            f"{n} ({side_word.get(by[n]['side'], by[n]['side'])}) — scrip {by[n]['scrip']}"
+            for n in filled
+        ]
+        try:
+            from notifications.email import send_partial_fill_alert
+            send_partial_fill_alert(stock_name, filled_desc, problems)
+        except Exception as e:
+            _save_log(db, "ERROR", f"{stock_name}: partial-fill alert email FAILED - {_exc_detail(e)}")
+    else:
+        try:
+            from notifications.email import send_trade_opened_email
+            send_trade_opened_email(stock_name, _field("FUT", "entry") or 0, ce_strike or 0,
+                                    _field("CE", "entry") or 0, pe_strike or 0, _field("PE", "entry") or 0)
+        except Exception as e:
+            _save_log(db, "WARNING", f"{stock_name}: trade-opened email failed - {_exc_detail(e)}")
+
+    return trade
 
 
 # ─── Fixed Trades (Number 3) ───────────────────────────────────────────────────
@@ -337,31 +488,13 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         return
 
     # Step 5: Find best PE strike (premium must be lower than CE premium)
-    pe_options = [
-        {"strike": o["StrikeRate"], "premium": o["LastRate"], "type": "PE"}
-        for o in option_chain if o.get("CPType") == "PE"
-    ]
-    pe_strike, pe_premium = find_pe_strike(pe_options, ce_premium)
-
+    # Steps 5-7: pick the highest-premium PE below the CE premium that is actually
+    # tradeable (skips zero-volume strikes + confirms live offers via market depth),
+    # so the PE buy never gets rejected as an illiquid contract.
+    pe_strike, pe_premium, pe_scrip_code = _pick_liquid_pe(
+        db, settings, ft.stock_name, option_chain, ce_premium)
     if pe_strike is None:
-        _save_log(db, "ERROR", f"{ft.stock_name}: no valid PE strike found below CE premium {ce_premium}")
-        return
-
-    # Step 6: Validate CE premium > PE premium
-    if not validate_premium_condition(ce_premium, pe_premium):
-        _save_log(db, "ERROR", f"{ft.stock_name}: premium condition failed - CE {ce_premium} <= PE {pe_premium}")
-        return
-
-    # Step 7: Get PE scrip code from option chain
-    pe_option = next(
-        (o for o in option_chain if o.get("StrikeRate") == pe_strike and o.get("CPType") == "PE"),
-        None
-    )
-    pe_scrip_code = str(pe_option.get("Scripcode", "")) if pe_option else ""
-
-    if not pe_scrip_code:
-        _save_log(db, "ERROR", f"{ft.stock_name}: PE option has no scrip code in chain response")
-        return
+        return  # _pick_liquid_pe already logged the reason
 
     # Step 8: Resolve the real futures contract scrip code (not the equity code)
     futures_scrip_code = fivepaisa.get_futures_scrip_code(ft.stock_name, expiry)
@@ -398,66 +531,27 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     )
 
     # Check which were accepted by the broker (RMS-level check)
-    accepted, rejected_errors = [], []
-    for result, remote_id, leg in [
-        (futures_result, fut_remote_id, "FUT"),
-        (ce_result,      ce_remote_id,  "CE"),
-        (pe_result,      pe_remote_id,  "PE"),
-    ]:
-        if result["success"]:
-            accepted.append((remote_id, leg))
-        else:
-            rejected_errors.append(f"{leg}: {result['error']}")
-
-    if rejected_errors:
-        # At least one leg was rejected at broker level
-        _save_log(db, "ERROR", f"{ft.stock_name}: order(s) rejected — {'; '.join(rejected_errors)}")
-        if accepted:
-            # Some legs went through — alert client, do NOT square off
-            _alert_partial_fill(db, ft.stock_name,
-                [(None, "B" if l == "FUT" or l == "PE" else "S", l) for _, l in accepted],
-                '; '.join(rejected_errors))
-        return
-
-    # All 3 accepted — now confirm actual exchange fills via OrderStatus
-    filled, unfilled = _confirm_fills(settings, db, ft.stock_name, accepted)
-    if unfilled:
-        _alert_partial_fill(db, ft.stock_name,
-            [(None, "B" if l == "FUT" or l == "PE" else "S", l) for l in filled],
-            f"not fully executed: {', '.join(unfilled)}")
-        return
-
-    # Step 9: Save trade to database
-    trade = Trade(
+    # Save & track whatever actually opened. A partial fill is no longer discarded:
+    # the legs that filled are tracked normally, the rest are left empty (like a
+    # naked-CE trade) and the client is alerted to handle them manually.
+    _finalize_live_collar(
+        db, settings,
         stock_name=ft.stock_name,
         trade_source="fixed",
         fixed_trade_id=ft.id,
-        is_paper_trade=False,
         month_type=ft.month_type,
         lot_size=lot_size,
-        futures_scrip_code=futures_scrip_code,
-        ce_scrip_code=ce_scrip_code,
-        pe_scrip_code=pe_scrip_code,
-        futures_broker_order_id=str(futures_result["broker_order_id"]),
-        ce_broker_order_id=str(ce_result["broker_order_id"]),
-        pe_broker_order_id=str(pe_result["broker_order_id"]),
         expiry_date=chain_result.get("expiry"),
-        futures_entry_price=futures_price,
-        ce_entry_price=ce_premium,
-        pe_entry_price=pe_premium,
         profit_target=ft.profit_target,
         loss_limit=ft.loss_limit,
-        status="open"
+        legs=[
+            {"name": "FUT", "side": "B", "scrip": futures_scrip_code, "entry": futures_price, "result": futures_result, "remote": fut_remote_id},
+            {"name": "CE",  "side": "S", "scrip": ce_scrip_code,      "entry": ce_premium,    "result": ce_result,      "remote": ce_remote_id},
+            {"name": "PE",  "side": "B", "scrip": pe_scrip_code,      "entry": pe_premium,    "result": pe_result,      "remote": pe_remote_id},
+        ],
+        ce_strike=ce_strike,
+        pe_strike=pe_strike,
     )
-    db.add(trade)
-    _save_log(db, "INFO", f"{ft.stock_name}: collar trade placed - Futures@{futures_price}, CE {ce_strike}@{ce_premium} sold, PE {pe_strike}@{pe_premium} bought")
-    db.commit()
-
-    try:
-        from notifications.email import send_trade_opened_email
-        send_trade_opened_email(ft.stock_name, futures_price, ce_strike, ce_premium, pe_strike, pe_premium)
-    except Exception as e:
-        _save_log(db, "WARNING", f"{ft.stock_name}: email notification failed - {str(e)}")
 
 
 def _place_option_trade(db, settings, ft: FixedTrade):
@@ -590,7 +684,8 @@ def _place_paper_trade(db, settings, ft: FixedTrade):
             ce_scrip_code = str(ce_option.get("Scripcode", "")) or None
 
         pe_options = [
-            {"strike": o["StrikeRate"], "premium": o["LastRate"], "type": "PE"}
+            {"strike": o["StrikeRate"], "premium": o["LastRate"], "type": "PE",
+             "volume": o.get("TotalQty", 0)}
             for o in option_chain if o.get("CPType") == "PE"
         ]
         pe_strike, pe_prem = find_pe_strike(pe_options, ce_premium)
@@ -762,25 +857,13 @@ def run_webhook_trade(stock_name: str, force: bool = False):
             return
 
         # ── Collar trade: Buy Futures + Sell CE + Buy PE ────────────────────
-        pe_options = [
-            {"strike": o["StrikeRate"], "premium": o["LastRate"], "type": "PE"}
-            for o in option_chain if o.get("CPType") == "PE"
-        ]
-        pe_strike, pe_premium = find_pe_strike(pe_options, ce_premium)
-
-        if pe_strike is None or not validate_premium_condition(ce_premium, pe_premium):
-            _save_log(db, "ERROR", f"Webhook {stock_name}: no valid PE strike found (CE premium {ce_premium})")
-            return
-
-        pe_option = next(
-            (o for o in option_chain if o.get("StrikeRate") == pe_strike and o.get("CPType") == "PE"),
-            None
-        )
-        pe_scrip_code = str(pe_option.get("Scripcode", "")) if pe_option else ""
-
-        if not pe_scrip_code:
-            _save_log(db, "ERROR", f"Webhook {stock_name}: PE option has no scrip code")
-            return
+        # Pick the highest-premium PE below the CE premium that is actually tradeable
+        # (skips zero-volume strikes + confirms live offers via market depth), so the
+        # PE buy never gets rejected as an illiquid contract.
+        pe_strike, pe_premium, pe_scrip_code = _pick_liquid_pe(
+            db, settings, stock_name, option_chain, ce_premium)
+        if pe_strike is None:
+            return  # _pick_liquid_pe already logged the reason
 
         futures_scrip_code = fivepaisa.get_futures_scrip_code(stock_name, expiry)
         if not futures_scrip_code:
@@ -792,7 +875,6 @@ def run_webhook_trade(stock_name: str, force: bool = False):
         if fut_price is not None:
             futures_price = fut_price
 
-        futures_order_id = ce_order_id = pe_order_id = None
         if not is_paper:
             # Capture remote IDs before placement — same IDs reused for fill-confirmation
             fut_remote_id = generate_remote_order_id(stock_name + "_FUT")
@@ -812,55 +894,38 @@ def run_webhook_trade(stock_name: str, force: bool = False):
                 _marketable_limit_price(pe_premium, "B"), lot_size, False, pe_remote_id
             )
 
-            # Step 1: broker-level acceptance (RMS) check
-            if not all([futures_result["success"], ce_result["success"], pe_result["success"]]):
-                errors = []
-                placed_legs = []
-                if futures_result["success"]:
-                    placed_legs.append((futures_scrip_code, "B", "FUT"))
-                else:
-                    errors.append(f"Futures: {futures_result['error']}")
-                if ce_result["success"]:
-                    placed_legs.append((ce_scrip_code, "S", "CE"))
-                else:
-                    errors.append(f"CE: {ce_result['error']}")
-                if pe_result["success"]:
-                    placed_legs.append((pe_scrip_code, "B", "PE"))
-                else:
-                    errors.append(f"PE: {pe_result['error']}")
-                _save_log(db, "ERROR", f"Screener {stock_name}: order(s) failed — {'; '.join(errors)}")
-                if placed_legs:
-                    _alert_partial_fill(db, stock_name, placed_legs, '; '.join(errors))
-                return
+            # Save & track whatever actually opened — partial fills are kept (only the
+            # filled legs are tracked), and the client is alerted about the rest.
+            _finalize_live_collar(
+                db, settings,
+                stock_name=stock_name,
+                trade_source="webhook",
+                fixed_trade_id=None,
+                month_type=month_type,
+                lot_size=lot_size,
+                expiry_date=chain_result.get("expiry"),
+                profit_target=profit_target,
+                loss_limit=loss_limit,
+                legs=[
+                    {"name": "FUT", "side": "B", "scrip": futures_scrip_code, "entry": futures_price, "result": futures_result, "remote": fut_remote_id},
+                    {"name": "CE",  "side": "S", "scrip": ce_scrip_code,      "entry": ce_premium,    "result": ce_result,      "remote": ce_remote_id},
+                    {"name": "PE",  "side": "B", "scrip": pe_scrip_code,      "entry": pe_premium,    "result": pe_result,      "remote": pe_remote_id},
+                ],
+                ce_strike=ce_strike,
+                pe_strike=pe_strike,
+            )
+            return
 
-            # Step 2: exchange fill confirmation — same IDs that were sent to the broker
-            _filled, _unfilled = _confirm_fills(settings, db, stock_name, [
-                (fut_remote_id, "FUT"),
-                (ce_remote_id,  "CE"),
-                (pe_remote_id,  "PE"),
-            ])
-            if _unfilled:
-                _alert_partial_fill(db, stock_name,
-                    [(None, "B" if l in ("FUT", "PE") else "S", l) for l in _filled],
-                    f"not fully executed: {', '.join(_unfilled)}")
-                return
-
-            futures_order_id = str(futures_result["broker_order_id"])
-            ce_order_id = str(ce_result["broker_order_id"])
-            pe_order_id = str(pe_result["broker_order_id"])
-
+        # Paper trade — no real order, record all legs at their reference prices.
         trade = Trade(
             stock_name=stock_name.upper(),
             trade_source="webhook",
-            is_paper_trade=is_paper,
+            is_paper_trade=True,
             month_type=month_type,
             lot_size=lot_size,
             futures_scrip_code=futures_scrip_code,
             ce_scrip_code=ce_scrip_code,
             pe_scrip_code=pe_scrip_code,
-            futures_broker_order_id=futures_order_id,
-            ce_broker_order_id=ce_order_id,
-            pe_broker_order_id=pe_order_id,
             futures_entry_price=futures_price,
             ce_entry_price=ce_premium,
             pe_entry_price=pe_premium,
@@ -870,9 +935,8 @@ def run_webhook_trade(stock_name: str, force: bool = False):
             status="open"
         )
         db.add(trade)
-        mode = "PAPER" if is_paper else "LIVE"
         _save_log(db, "INFO",
-            f"Screener {stock_name}: collar placed ({mode}) — Futures@{futures_price}, "
+            f"Screener {stock_name}: collar placed (PAPER) — Futures@{futures_price}, "
             f"CE {ce_strike}@{ce_premium} sold, PE {pe_strike}@{pe_premium} bought, lot {lot_size}")
         db.commit()
 

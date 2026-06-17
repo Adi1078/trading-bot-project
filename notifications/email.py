@@ -79,8 +79,12 @@ def _send_email(subject: str, body: str, to: str = None):
 def send_partial_fill_alert(stock_name: str, filled_legs: list, failed_legs: list):
     """
     URGENT alert: a trade only PARTIALLY executed (some legs filled, some failed).
-    The bot deliberately does NOT square anything off — the client handles the
-    exposed position manually. This email tells them what's open and what failed.
+    The bot now TRACKS the legs that opened (live P&L, profit-target / stop / expiry
+    close) but it does NOT square them off here. The legs that failed never opened —
+    the client adds those manually on 5paisa if they want the full hedge.
+
+    failed_legs items include the exact broker reason each leg didn't fill
+    (e.g. "PE: Trading not allowed in illiquid contract"), so the client sees why.
     """
     filled_html = "".join(f"<li>{x}</li>" for x in filled_legs) or "<li>—</li>"
     failed_html = "".join(f"<li>{x}</li>" for x in failed_legs) or "<li>—</li>"
@@ -88,13 +92,13 @@ def send_partial_fill_alert(stock_name: str, filled_legs: list, failed_legs: lis
     body = f"""
     <html><body style="font-family:Arial,sans-serif;">
     <h2 style="color:#e74c3c;">⚠️ Partial Trade — Manual Action Needed</h2>
-    <p><b>{stock_name}</b>: only part of the trade executed. The bot has
-    <b>NOT</b> squared anything off — please review and handle these positions
-    manually on 5paisa.</p>
-    <p><b>Legs that went through (OPEN positions):</b></p>
+    <p><b>{stock_name}</b>: only part of the trade executed. The bot is now
+    <b>tracking the legs that opened</b> (they show on the dashboard and will be
+    managed on your targets), but it has <b>NOT</b> squared them off.</p>
+    <p><b>Legs that went through (OPEN — tracked by the bot):</b></p>
     <ul>{filled_html}</ul>
-    <p><b>Legs that FAILED:</b></p>
-    <ul>{failed_html}</ul>
+    <p><b>Legs that did NOT fill — and the reason why (handle manually on 5paisa):</b></p>
+    <ul style="color:#e74c3c;">{failed_html}</ul>
     </body></html>
     """
     _send_email(subject, body)

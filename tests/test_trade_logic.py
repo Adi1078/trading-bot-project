@@ -10,6 +10,7 @@ import pytest
 from bot.strike_calculator import (
     calculate_ce_strike,
     find_pe_strike,
+    find_pe_candidates,
     validate_premium_condition,
     get_strike_interval,
     round_strike_up
@@ -72,6 +73,48 @@ def test_find_pe_strike_none_when_all_too_expensive():
     strike, premium = find_pe_strike(option_chain, ce_sell_premium=13.85)
     assert strike is None
     assert premium is None
+
+def test_find_pe_strike_skips_zero_volume():
+    """A higher-premium PE with zero day volume is illiquid → skip it for the next."""
+    option_chain = [
+        {"strike": 1090, "premium": 11.1, "type": "PE", "volume": 0},     # illiquid
+        {"strike": 1050, "premium": 8.5,  "type": "PE", "volume": 1200},  # liquid
+    ]
+    strike, premium = find_pe_strike(option_chain, ce_sell_premium=13.85)
+    assert strike == 1050
+    assert premium == 8.5
+
+
+def test_find_pe_strike_skips_zero_premium():
+    """A PE that never traded today (premium 0) is not tradeable."""
+    option_chain = [
+        {"strike": 1090, "premium": 0,    "type": "PE", "volume": 500},   # no trades
+        {"strike": 1050, "premium": 8.5,  "type": "PE", "volume": 1200},
+    ]
+    strike, premium = find_pe_strike(option_chain, ce_sell_premium=13.85)
+    assert strike == 1050
+
+
+def test_find_pe_candidates_ranked_and_filtered():
+    """Candidates are returned highest-premium first, with illiquid strikes dropped."""
+    option_chain = [
+        {"strike": 1090, "premium": 11.1, "type": "PE", "volume": 500},
+        {"strike": 1050, "premium": 8.5,  "type": "PE", "volume": 0},     # illiquid - dropped
+        {"strike": 1000, "premium": 5.0,  "type": "PE", "volume": 300},
+    ]
+    cands = find_pe_candidates(option_chain, ce_sell_premium=13.85)
+    assert [c["strike"] for c in cands] == [1090, 1000]
+
+
+def test_find_pe_candidates_volume_optional():
+    """When volume isn't supplied, candidates are treated as liquid (back-compat)."""
+    option_chain = [
+        {"strike": 1090, "premium": 11.1, "type": "PE"},
+        {"strike": 1050, "premium": 8.5,  "type": "PE"},
+    ]
+    cands = find_pe_candidates(option_chain, ce_sell_premium=13.85)
+    assert [c["strike"] for c in cands] == [1090, 1050]
+
 
 def test_validate_premium_condition_pass():
     """CE premium > PE premium should pass."""

@@ -30,25 +30,49 @@ def calculate_ce_strike(futures_price, strike_type, strike_value, stock_name):
     return float(round_strike_up(raw_strike, interval))
 
 
+def _is_liquid(opt):
+    """
+    A PE candidate is only worth considering if it has actually traded — a premium
+    above 0 and (when the volume is known) non-zero day volume. This drops the
+    dead/illiquid far-OTM strikes that 5paisa rejects with "Trading not allowed in
+    illiquid contract". Volume is optional so callers/tests that don't supply it
+    still work (they're treated as liquid).
+    """
+    if opt["premium"] <= 0:
+        return False
+    if "volume" in opt and (opt["volume"] or 0) <= 0:
+        return False
+    return True
+
+
+def find_pe_candidates(option_chain, ce_sell_premium):
+    """
+    All tradeable PE strikes whose premium is below the CE sell premium, ranked from
+    highest premium (closest to CE) down. The caller can walk this list and confirm
+    real order-book liquidity (Market Depth) on each before placing, falling through
+    to the next-best one if a strike has no live offers.
+
+    option_chain: [{"strike", "premium", "type", "volume"(optional)}, ...]
+    Returns: list of dicts sorted by premium descending (may be empty).
+    """
+    valid = [
+        opt for opt in option_chain
+        if opt["type"] == "PE" and opt["premium"] < ce_sell_premium and _is_liquid(opt)
+    ]
+    return sorted(valid, key=lambda x: x["premium"], reverse=True)
+
+
 def find_pe_strike(option_chain, ce_sell_premium):
     """
-    Find the best PE strike to buy.
-    Rule: PE buy premium must be lower than CE sell premium.
-    Among all valid PE options, pick the one with the highest premium
-    (closest to CE premium but still below it).
+    Find the best (highest-premium, still-below-CE) tradeable PE strike to buy.
 
     option_chain: list of dicts -> [{"strike": 1090, "premium": 11.1, "type": "PE"}, ...]
     Returns: (strike, premium) or (None, None) if no valid PE found
     """
-    valid_pe_options = [
-        opt for opt in option_chain
-        if opt["type"] == "PE" and opt["premium"] < ce_sell_premium
-    ]
-
-    if not valid_pe_options:
+    candidates = find_pe_candidates(option_chain, ce_sell_premium)
+    if not candidates:
         return None, None
-
-    best_pe = max(valid_pe_options, key=lambda x: x["premium"])
+    best_pe = candidates[0]
     return best_pe["strike"], best_pe["premium"]
 
 

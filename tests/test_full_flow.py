@@ -106,14 +106,31 @@ def multi_quote_ok(fut, ce, pe):
 
 
 def chain_ok(ce_strike=1150):
+    # TotalQty>0 marks the strikes as liquid (the bot skips zero-volume strikes).
     return {
         "success": True,
         "option_chain": [
-            {"StrikeRate": ce_strike, "CPType": "CE", "LastRate": 13.85, "Scripcode": "55001"},
-            {"StrikeRate": ce_strike - 50, "CPType": "PE", "LastRate": 11.1, "Scripcode": "55002"},
-            {"StrikeRate": ce_strike - 100, "CPType": "PE", "LastRate": 8.5, "Scripcode": "55003"},
+            {"StrikeRate": ce_strike, "CPType": "CE", "LastRate": 13.85, "Scripcode": "55001", "TotalQty": 5000},
+            {"StrikeRate": ce_strike - 50, "CPType": "PE", "LastRate": 11.1, "Scripcode": "55002", "TotalQty": 3000},
+            {"StrikeRate": ce_strike - 100, "CPType": "PE", "LastRate": 8.5, "Scripcode": "55003", "TotalQty": 2000},
         ],
     }
+
+
+def depth_ok():
+    """Market-depth response with live sell-side offers (flag 83) → tradeable PE."""
+    return {
+        "success": True,
+        "depth": [
+            {"BbBuySellFlag": 66, "Price": 11.0, "Quantity": 150, "NumberOfOrders": 2},
+            {"BbBuySellFlag": 83, "Price": 11.2, "Quantity": 120, "NumberOfOrders": 3},
+        ],
+    }
+
+
+def depth_empty():
+    """Market-depth response with NO sell-side offers → illiquid, can't buy."""
+    return {"success": True, "depth": [{"BbBuySellFlag": 66, "Price": 11.0, "Quantity": 150, "NumberOfOrders": 2}]}
 
 
 def order_ok(oid):
@@ -145,6 +162,7 @@ def test_collar_trade_placed_and_saved(mock_broker):
     mock_broker.get_lot_size.return_value = 400
     mock_broker.place_order.side_effect = [order_ok(111), order_ok(222), order_ok(333)]
     mock_broker.get_order_status.return_value = fill_ok()  # all legs fully executed
+    mock_broker.get_market_depth.return_value = depth_ok()  # PE has live offers
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
         with patch("notifications.email.send_trade_opened_email"):
@@ -166,6 +184,60 @@ def test_collar_trade_placed_and_saved(mock_broker):
     assert trade.pe_broker_order_id == "333"
     assert trade.is_paper_trade is False
     assert mock_broker.place_order.call_count == 3
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_collar_pe_falls_through_to_liquid_strike(mock_broker):
+    """Best PE strike has no live offers (illiquid) → bot falls through to the next
+    PE that IS tradeable and uses that one (avoids the illiquid-contract rejection)."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.place_order.side_effect = [order_ok(111), order_ok(222), order_ok(333)]
+    mock_broker.get_order_status.return_value = fill_ok()
+    # Best PE (strike 1100, scrip 55002) has no offers; next PE (1050, scrip 55003) does.
+    def depth_by_scrip(token, client, exch, exch_type, scrip_code):
+        return depth_empty() if str(scrip_code) == "55002" else depth_ok()
+    mock_broker.get_market_depth.side_effect = depth_by_scrip
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade is not None
+    assert trade.pe_scrip_code == "55003"   # the liquid fallback, not the illiquid 55002
+    assert trade.pe_entry_price == 8.5
+    assert mock_broker.place_order.call_count == 3
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_collar_skips_when_no_liquid_pe(mock_broker):
+    """No PE strike has live offers → the whole collar is skipped (NO naked FUT+CE),
+    because there's no tradeable hedge."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_empty()  # no PE has offers
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.time"):
+            trade_manager.run_fixed_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    pe_log = db.query(Log).filter(Log.message.contains("no tradeable PE")).first()
+    db.close()
+    assert trade is None                       # nothing opened
+    assert pe_log is not None                   # reason logged
+    mock_broker.place_order.assert_not_called()  # crucial: never fire FUT+CE without a PE
 
 
 @patch("bot.trade_manager.fivepaisa")
@@ -262,6 +334,7 @@ def test_webhook_trade_places_collar(mock_broker):
     mock_broker.get_lot_size.return_value = 400
     mock_broker.place_order.side_effect = [order_ok(201), order_ok(202), order_ok(203)]
     mock_broker.get_order_status.return_value = fill_ok()  # all legs fully executed
+    mock_broker.get_market_depth.return_value = depth_ok()  # PE has live offers
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
         with patch("bot.trade_manager.time"):  # skip the 1-second sleep in tests
@@ -526,9 +599,10 @@ def test_naked_ce_percent_strike_places_limit_order(mock_broker):
 # ── Partial fill: no square-off, email the client ─────────────────────────────
 
 @patch("bot.trade_manager.fivepaisa")
-def test_partial_fill_no_squareoff_and_emails(mock_broker):
-    """Futures fills but CE fails → bot does NOT square off the futures and sends
-    an immediate partial-fill alert email (client handles it manually)."""
+def test_partial_fill_tracks_open_legs_and_emails(mock_broker):
+    """Futures fills but CE & PE are rejected → bot SAVES a trade tracking ONLY the
+    filled futures leg (CE/PE left empty, like a naked-CE trade), does NOT square it
+    off, and sends a partial-fill alert email so the client handles the rest."""
     add(make_settings(), make_watchlist(), make_fixed_trade())
     mock_broker.get_market_quote.return_value = quote_ok(1126.3)
     mock_broker.get_option_chain.return_value = chain_ok(1150)
@@ -540,6 +614,8 @@ def test_partial_fill_no_squareoff_and_emails(mock_broker):
         {"success": False, "error": "RMS reject CE"},
         {"success": False, "error": "RMS reject PE"},
     ]
+    mock_broker.get_order_status.return_value = fill_ok()  # the accepted FUT leg fills
+    mock_broker.get_market_depth.return_value = depth_ok()  # PE has live offers
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
         with patch("notifications.email.send_partial_fill_alert") as mock_alert:
@@ -548,12 +624,58 @@ def test_partial_fill_no_squareoff_and_emails(mock_broker):
 
     # All 3 order calls fired at once — no square-off (no extra calls)
     assert mock_broker.place_order.call_count == 3, "all 3 legs fired at once"
-    mock_alert.assert_called_once()   # client alerted
+    mock_alert.assert_called_once()   # client alerted about the failed legs
 
     db = TestSession()
     trade = db.query(Trade).first()
     db.close()
-    assert trade is None   # partial collar is not saved as a normal trade
+    # The filled futures leg IS tracked; the rejected CE/PE legs are left empty.
+    assert trade is not None, "the leg that opened should be tracked"
+    assert trade.status == "open"
+    assert trade.futures_broker_order_id == "111"
+    assert trade.futures_entry_price == 1126.3
+    assert trade.ce_broker_order_id is None
+    assert trade.pe_broker_order_id is None
+    assert trade.ce_scrip_code is None
+    assert trade.pe_scrip_code is None
+    assert trade.is_paper_trade is False
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_webhook_partial_fill_tracks_open_legs(mock_broker):
+    """Screener collar: PE rejected as illiquid (the real BEL case) → bot tracks the
+    filled FUT+CE legs and leaves PE empty, sending the partial-fill alert."""
+    add(make_settings(), make_watchlist("ONGC", "500312"))
+    mock_broker.get_market_quote.return_value = quote_ok(280.5, "500312")
+    mock_broker.get_option_chain.return_value = chain_ok(300)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    # FUT accepted, CE accepted, PE rejected (illiquid contract)
+    mock_broker.place_order.side_effect = [
+        order_ok(201),
+        order_ok(202),
+        {"success": False, "error": "Trading not allowed in illiquid contract"},
+    ]
+    mock_broker.get_order_status.return_value = fill_ok()  # accepted legs fill
+    mock_broker.get_market_depth.return_value = depth_ok()  # PE has live offers
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_partial_fill_alert") as mock_alert:
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_webhook_trade("ONGC")
+
+    assert mock_broker.place_order.call_count == 3
+    mock_alert.assert_called_once()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade is not None
+    assert trade.status == "open"
+    assert trade.futures_broker_order_id == "201"
+    assert trade.ce_broker_order_id == "202"
+    assert trade.pe_broker_order_id is None   # the illiquid PE is left empty
+    assert trade.pe_scrip_code is None
 
 
 # ── Traceback debugging on real-trade errors ─────────────────────────────────
