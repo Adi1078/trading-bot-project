@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign In — Trading Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        .login-wrap {
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        }
+        .login-card {
+            background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+            padding: 32px 28px; width: 340px; max-width: 90vw;
+        }
+        .login-card h2 { margin: 0 0 4px; color: #e6edf3; }
+        .login-card .sub { color: #8b949e; font-size: 13px; margin-bottom: 22px; }
+        .login-card label { display: block; color: #e6edf3; font-size: 13px; margin: 14px 0 6px; }
+        .login-card input {
+            width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d;
+            border-radius: 6px; color: #e6edf3; font-size: 14px; box-sizing: border-box;
+        }
+        .login-card button { width: 100%; margin-top: 22px; padding: 11px; font-size: 14px; }
+        .login-err { color: #f85149; font-size: 13px; margin-top: 14px; min-height: 16px; }
+    </style>
+</head>
+<body>
+    <div class="login-wrap">
+        <div class="login-card">
+            <h2 id="title">Sign In</h2>
+            <div class="sub" id="subtitle">Enter your username and password.</div>
+
+            <label for="username">Username</label>
+            <input type="text" id="username" autocomplete="username" autofocus>
+
+            <label for="password">Password</label>
+            <input type="password" id="password" autocomplete="current-password">
+
+            <button class="btn btn-primary" id="submitBtn" onclick="submitForm()">Sign In</button>
+            <div class="login-err" id="error"></div>
+        </div>
+    </div>
+
+    <script>
+        let isSetup = false;
+
+        async function init() {
+            try {
+                const r = await fetch('/api/access/status');
+                const d = await r.json();
+                if (!d.configured) {
+                    isSetup = true;
+                    document.getElementById('title').textContent = 'Create Your Login';
+                    document.getElementById('subtitle').textContent =
+                        'First time setup — choose a username and password. Username 3+ chars, password 6+ chars.';
+                    document.getElementById('submitBtn').textContent = 'Create & Sign In';
+                    document.getElementById('password').setAttribute('autocomplete', 'new-password');
+                }
+            } catch (e) { /* fall back to login mode */ }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') submitForm();
+        });
+
+        async function submitForm() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const errEl = document.getElementById('error');
+            const btn = document.getElementById('submitBtn');
+            errEl.textContent = '';
+
+            if (!username || !password) {
+                errEl.textContent = 'Please enter username and password.';
+                return;
+            }
+
+            btn.disabled = true;
+            const original = btn.textContent;
+            btn.textContent = 'Please wait...';
+
+            try {
+                const endpoint = isSetup ? '/api/access/setup' : '/api/access/login';
+                const r = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const d = await r.json();
+                if (d.success) {
+                    window.location.href = '/';
+                } else {
+                    errEl.textContent = d.error || 'Something went wrong.';
+                    btn.disabled = false;
+                    btn.textContent = original;
+                }
+            } catch (e) {
+                errEl.textContent = 'Network error. Please try again.';
+                btn.disabled = false;
+                btn.textContent = original;
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

@@ -33,3 +33,6 @@ class Settings(Base):
     screener_2_clause = Column(String, nullable=True)
     screener_3_url = Column(String, nullable=True)
     screener_3_clause = Column(String, nullable=True)
+    ui_username = Column(String, nullable=True)        # login page username (client-set)
+    ui_password_hash = Column(String, nullable=True)   # PBKDF2 hash of login password
+    ui_session_secret = Column(String, nullable=True)  # signing key for the trusted-device cookie

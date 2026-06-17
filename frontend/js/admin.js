@@ -160,6 +160,31 @@ async function clearCredentials() {
     }
 }
 
+async function changeCredentials() {
+    const current_password = document.getElementById("secCurrentPassword").value;
+    const new_username = document.getElementById("secNewUsername").value.trim();
+    const new_password = document.getElementById("secNewPassword").value;
+
+    if (!current_password || !new_username || !new_password) {
+        showToast("Fill in current password, new username and new password", "error");
+        return;
+    }
+
+    const data = await api("/api/access/credentials", {
+        method: "POST",
+        body: JSON.stringify({ current_password, new_username, new_password })
+    });
+
+    if (data.success) {
+        showToast(data.message || "Login updated", "success");
+        document.getElementById("secCurrentPassword").value = "";
+        document.getElementById("secNewUsername").value = "";
+        document.getElementById("secNewPassword").value = "";
+    } else {
+        showToast(data.error || "Failed to update login", "error");
+    }
+}
+
 async function saveAutoLogin() {
     const body = {};
     const clientCode = document.getElementById("clientCode").value.trim();

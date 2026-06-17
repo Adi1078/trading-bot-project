@@ -35,6 +35,9 @@ def _ensure_columns():
             "screener_3_clause": "TEXT",
             "totp_secret": "VARCHAR",
             "login_pin": "VARCHAR",
+            "ui_username": "VARCHAR",
+            "ui_password_hash": "VARCHAR",
+            "ui_session_secret": "VARCHAR",
         },
         "trades": {
             "expiry_date": "VARCHAR",

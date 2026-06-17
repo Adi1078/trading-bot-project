@@ -567,6 +567,31 @@
                     </div>
                 </div>
             </div>
+
+            <div class="card">
+                <div class="card-header"><h3>Login / Security</h3></div>
+                <div class="card-body" style="padding:20px;">
+                    <p style="color:#8b949e;font-size:13px;margin:0 0 16px;">
+                        Change the username and password used to sign in to this panel.
+                        Devices already signed in stay signed in.
+                    </p>
+                    <div class="form-group">
+                        <label>Current Password</label>
+                        <input type="password" class="form-control" id="secCurrentPassword" autocomplete="current-password">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>New Username</label>
+                            <input type="text" class="form-control" id="secNewUsername" autocomplete="username">
+                        </div>
+                        <div class="form-group">
+                            <label>New Password</label>
+                            <input type="password" class="form-control" id="secNewPassword" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="changeCredentials()">Update Login</button>
+                </div>
+            </div>
         </div>
 
     </div>
@@ -576,6 +601,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/admin.js?v=15"></script>
+<script src="/static/js/admin.js?v=16"></script>
 </body>
 </html>
