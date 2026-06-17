@@ -44,9 +44,15 @@ def _is_liquid(opt):
     illiquid contract". Volume is optional so callers/tests that don't supply it
     still work (they're treated as liquid).
     """
-    if opt["premium"] <= 0:
+    def _n(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if _n(opt.get("premium")) <= 0:
         return False
-    if "volume" in opt and (opt["volume"] or 0) <= 0:
+    if "volume" in opt and _n(opt.get("volume")) <= 0:
         return False
     return True
 

@@ -595,22 +595,30 @@ def get_option_chain(access_token, stock_name, expiry_date, strike_price):
     def _q(scrip_code, field, default=0):
         return quotes.get(str(scrip_code), {}).get(field, default)
 
+    def _num(value, default=0):
+        # MarketSnapshot returns some fields as strings (e.g. Volume "10256000").
+        # Coerce to a number so downstream numeric comparisons don't blow up.
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     option_chain = []
     if ce_instrument:
         option_chain.append({
             "StrikeRate": ce_instrument["StrikeRate"],
             "CPType": "CE",
             "Scripcode": ce_instrument["ScripCode"],
-            "LastRate": _q(ce_instrument["ScripCode"], "LastRate"),
-            "TotalQty": _q(ce_instrument["ScripCode"], "Volume")
+            "LastRate": _num(_q(ce_instrument["ScripCode"], "LastRate")),
+            "TotalQty": _num(_q(ce_instrument["ScripCode"], "Volume"))
         })
     for pe in pe_instruments:
         option_chain.append({
             "StrikeRate": pe["StrikeRate"],
             "CPType": "PE",
             "Scripcode": pe["ScripCode"],
-            "LastRate": _q(pe["ScripCode"], "LastRate"),
-            "TotalQty": _q(pe["ScripCode"], "Volume")
+            "LastRate": _num(_q(pe["ScripCode"], "LastRate")),
+            "TotalQty": _num(_q(pe["ScripCode"], "Volume"))
         })
 
     return {"success": True, "option_chain": option_chain, "expiry": actual_expiry}
