@@ -108,6 +108,45 @@ def toggle_trade(trade_id: int, db: Session = Depends(get_db)):
     return {"success": True, "is_trade": trade.is_trade}
 
 
+@router.post("/run/{trade_id}")
+def run_fixed_trade_now(trade_id: int, db: Session = Depends(get_db)):
+    """
+    Manually run a single fixed trade right now. Fires the exact same path the
+    scheduler uses at the start time (watchlist check, de-dup, PE liquidity
+    selection, partial-fill tracking, real order placement) — just scoped to one row.
+    """
+    from models.settings import Settings
+    from utils.exchange_calendar import is_trading_day
+
+    if not is_trading_day():
+        return {"success": False, "error": "Market is closed today (weekend/holiday)"}
+
+    settings = db.query(Settings).first()
+    if not settings or not settings.is_trading:
+        return {"success": False, "error": "Turn on the Trade switch first"}
+    if not settings.access_token:
+        return {"success": False, "error": "Broker not connected"}
+
+    trade = db.query(FixedTrade).filter(FixedTrade.id == trade_id).first()
+    if not trade:
+        return {"success": False, "error": "Fixed trade not found"}
+    if not trade.is_active:
+        return {"success": False, "error": f"{trade.stock_name} is not active — toggle it on first"}
+
+    stock_name = trade.stock_name
+
+    import threading
+    def _run():
+        from bot.trade_manager import run_single_fixed_trade
+        run_single_fixed_trade(trade_id)
+    threading.Thread(target=_run, daemon=True).start()
+
+    log = Log(level="INFO", message=f"Fixed trade '{stock_name}' triggered manually by user")
+    db.add(log)
+    db.commit()
+    return {"success": True, "message": f"{stock_name} triggered — check logs"}
+
+
 def _fixed_trade_to_dict(trade: FixedTrade):
     return {
         "id": trade.id,

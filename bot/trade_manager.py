@@ -414,6 +414,43 @@ def run_fixed_trades():
         db.close()
 
 
+def run_single_fixed_trade(trade_id: int):
+    """
+    Manually fire ONE fixed trade by id, right now. Uses the exact same guards and
+    the same _process_fixed_trade path the scheduler uses at the start time — so the
+    watchlist check, the "skip if an open trade already exists" de-dup, the PE
+    liquidity selection, partial-fill tracking and real order placement are all
+    identical. Only the scope (one row vs all) differs.
+    """
+    db = SessionLocal()
+    try:
+        settings = _get_settings(db)
+
+        if not settings or not settings.is_trading:
+            _save_log(db, "INFO", "Manual run skipped: trading is stopped")
+            return
+
+        if not settings.access_token:
+            _save_log(db, "ERROR", "Manual run skipped: broker not connected")
+            return
+
+        ft = db.query(FixedTrade).filter(FixedTrade.id == trade_id).first()
+        if not ft:
+            _save_log(db, "ERROR", f"Manual run skipped: fixed trade {trade_id} not found")
+            return
+        if not ft.is_active:
+            _save_log(db, "INFO", f"{ft.stock_name} manual run skipped: trade is not active")
+            return
+
+        _save_log(db, "INFO", f"Manually running fixed trade: {ft.stock_name}")
+        try:
+            _process_fixed_trade(db, settings, ft)
+        except Exception as e:
+            _save_log(db, "ERROR", f"Unexpected error for {ft.stock_name}: {_exc_detail(e)}")
+    finally:
+        db.close()
+
+
 def _process_fixed_trade(db, settings, ft: FixedTrade):
     """Decide how to handle a single fixed trade row."""
 

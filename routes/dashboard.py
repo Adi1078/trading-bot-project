@@ -137,31 +137,6 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
     return {"success": True}
 
 
-@router.post("/run-fixed-trades-now")
-def run_fixed_trades_now(db: Session = Depends(get_db)):
-    """Manually trigger fixed trades right now — for testing only."""
-    from utils.exchange_calendar import is_trading_day
-    if not is_trading_day():
-        return {"success": False, "error": "Market is closed today (weekend/holiday)"}
-
-    settings = db.query(Settings).first()
-    if not settings or not settings.is_trading:
-        return {"success": False, "error": "Turn on the Trade switch first"}
-    if not settings.access_token:
-        return {"success": False, "error": "Broker not connected"}
-
-    import threading
-    def _run():
-        from bot.trade_manager import run_fixed_trades
-        run_fixed_trades()
-    threading.Thread(target=_run, daemon=True).start()
-
-    log = Log(level="INFO", message="Fixed trades triggered manually by user")
-    db.add(log)
-    db.commit()
-    return {"success": True, "message": "Fixed trades triggered — check logs"}
-
-
 @router.post("/send-open-trades-report")
 def send_open_trades_report(db: Session = Depends(get_db)):
     """

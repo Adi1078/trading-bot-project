@@ -35,16 +35,14 @@ function showSection(e, name) {
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 
-async function runFixedTradesNow() {
-    const btn = document.getElementById("runNowBtn");
-    btn.disabled = true;
-    btn.textContent = "Running...";
-    const data = await api("/api/dashboard/run-fixed-trades-now", { method: "POST" });
-    btn.disabled = false;
-    btn.textContent = "Run Now";
+async function runFixedTradeNow(tradeId, stockName) {
+    if (!confirm(`Run the fixed trade for ${stockName} now? This places the live order immediately.`)) return;
+    const btn = document.getElementById(`runFt-${tradeId}`);
+    if (btn) { btn.disabled = true; btn.textContent = "Running..."; }
+    const data = await api(`/api/fixed-trades/run/${tradeId}`, { method: "POST" });
+    if (btn) { btn.disabled = false; btn.textContent = "Run Now"; }
     if (data.success) {
         showToast(data.message, "success");
-        setTimeout(loadLogs, 3000);
     } else {
         showToast(data.error, "error");
     }
@@ -419,6 +417,7 @@ async function loadFixedTrades() {
             </td>
             <td style="font-size:12px;color:#8b949e;">${formatDate(t.created_at)}</td>
             <td style="display:flex;gap:6px;">
+                <button class="btn btn-success btn-sm" id="runFt-${t.id}" onclick="runFixedTradeNow(${t.id}, '${t.stock_name}')">Run Now</button>
                 <button class="btn btn-secondary btn-sm" onclick="editFixedTrade(${JSON.stringify(t).replace(/"/g, '&quot;')})">Edit</button>
                 <button class="btn btn-warning btn-sm" onclick="toggleTrade(${t.id}, '${t.stock_name}')">Toggle</button>
                 <button class="btn btn-danger btn-sm" onclick="deleteFixedTrade(${t.id}, '${t.stock_name}')">Delete</button>
