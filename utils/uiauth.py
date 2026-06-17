@@ -15,11 +15,11 @@ long-lived signed cookie:
     do NOT rotate it when the password changes, so changing the password does not
     log existing trusted devices out (matches the chosen behaviour).
 """
+import base64
 import hashlib
 import hmac
+import json
 import secrets
-
-from itsdangerous import URLSafeSerializer
 
 COOKIE_NAME = "bot_auth"
 # ~10 years in seconds — effectively "until the browser cache is cleared".
@@ -47,15 +47,30 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+def _sign(secret: str, payload: str) -> str:
+    return hmac.new(
+        (secret + _SALT).encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+
+
 def make_token(secret: str, username: str) -> str:
-    """Sign a cookie value that identifies an authenticated device."""
-    return URLSafeSerializer(secret, salt=_SALT).dumps({"u": username})
+    """Sign a cookie value that identifies an authenticated device.
+
+    Format: '<b64url(json)>.<hmac-sha256>'. Uses only the standard library so the
+    server needs no extra package (avoids the itsdangerous dependency)."""
+    raw = json.dumps({"u": username}, separators=(",", ":")).encode()
+    payload = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return f"{payload}.{_sign(secret, payload)}"
 
 
 def verify_token(secret: str, token: str):
     """Return the username if the cookie is a valid signed token, else None."""
     try:
-        data = URLSafeSerializer(secret, salt=_SALT).loads(token)
+        payload, sig = token.rsplit(".", 1)
+        if not hmac.compare_digest(sig, _sign(secret, payload)):
+            return None
+        padded = payload + "=" * (-len(payload) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded))
         return data.get("u")
     except Exception:
         return None
