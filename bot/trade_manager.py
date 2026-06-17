@@ -218,11 +218,13 @@ def _pick_liquid_pe(db, settings, stock_name, option_chain, ce_premium, max_chec
     TRADEABLE, so the buy never gets rejected as an "illiquid contract".
 
     Two-stage liquidity guard:
-      1. Drop strikes with zero day volume / zero premium — free, uses the option
-         chain we already fetched (TotalQty + LastRate).
-      2. For the surviving candidates (best premium first), confirm via the level-5
-         Market Depth order book that there are live SELL-side offers (BbBuySellFlag
-         83, qty > 0) to buy from; take the first that passes.
+      1. Keep every PE strike priced below the CE premium (premium > 0). Day volume
+         is only a SOFT signal here (require_volume=False): 5paisa's feed can report
+         0 volume even for a liquid strike, so we must NOT drop those before the
+         authoritative depth check below.
+      2. For the candidates (best premium first), confirm via the level-5 Market
+         Depth order book that there are live SELL-side offers (BbBuySellFlag 83,
+         qty > 0) to buy from; take the first that passes. This is the real gate.
 
     Only the PE leg uses this — futures and the CE sell are unchanged.
     Returns (pe_strike, pe_premium, pe_scrip_code) or (None, None, None).
@@ -232,10 +234,12 @@ def _pick_liquid_pe(db, settings, stock_name, option_chain, ce_premium, max_chec
          "type": "PE", "volume": o.get("TotalQty", 0)}
         for o in option_chain if o.get("CPType") == "PE"
     ]
-    candidates = find_pe_candidates(pe_inputs, ce_premium)
+    # require_volume=False: the Market Depth check (stage 2) is the real liquidity
+    # gate, so a 0-volume reading must not eliminate an otherwise-tradeable strike.
+    candidates = find_pe_candidates(pe_inputs, ce_premium, require_volume=False)
     if not candidates:
         _save_log(db, "ERROR",
-            f"{stock_name}: no liquid PE strike below CE premium {ce_premium} (all zero-volume/illiquid)")
+            f"{stock_name}: no PE strike priced below CE premium {ce_premium}")
         return None, None, None
 
     scrip_by_strike = {

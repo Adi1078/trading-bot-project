@@ -122,6 +122,31 @@ def test_find_pe_candidates_volume_optional():
     assert [c["strike"] for c in cands] == [1090, 1050]
 
 
+def test_find_pe_candidates_soft_volume_keeps_zero_volume():
+    """
+    With require_volume=False (the live path, which has a Market Depth backstop) a
+    0-volume strike is KEPT — only zero-premium strikes are dropped. 5paisa can
+    report 0 volume for a genuinely liquid strike, so the depth check must decide.
+    """
+    option_chain = [
+        {"strike": 1090, "premium": 11.1, "type": "PE", "volume": 0},     # kept now
+        {"strike": 1050, "premium": 8.5,  "type": "PE", "volume": 1200},
+        {"strike": 1000, "premium": 0,    "type": "PE", "volume": 0},      # no premium -> dropped
+    ]
+    cands = find_pe_candidates(option_chain, ce_sell_premium=13.85, require_volume=False)
+    assert [c["strike"] for c in cands] == [1090, 1050]
+
+
+def test_find_pe_candidates_default_still_filters_volume():
+    """Default (require_volume=True, used by the paper path) still drops 0-volume."""
+    option_chain = [
+        {"strike": 1090, "premium": 11.1, "type": "PE", "volume": 0},     # dropped
+        {"strike": 1050, "premium": 8.5,  "type": "PE", "volume": 1200},
+    ]
+    cands = find_pe_candidates(option_chain, ce_sell_premium=13.85)
+    assert [c["strike"] for c in cands] == [1050]
+
+
 def test_validate_premium_condition_pass():
     """CE premium > PE premium should pass."""
     assert validate_premium_condition(13.85, 11.1) is True

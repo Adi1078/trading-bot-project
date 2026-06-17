@@ -36,13 +36,22 @@ def calculate_ce_strike(futures_price, strike_type, strike_value, stock_name):
     return float(futures_price * (1 + strike_value / 100))
 
 
-def _is_liquid(opt):
+def _is_liquid(opt, require_volume=True):
     """
     A PE candidate is only worth considering if it has actually traded — a premium
-    above 0 and (when the volume is known) non-zero day volume. This drops the
-    dead/illiquid far-OTM strikes that 5paisa rejects with "Trading not allowed in
-    illiquid contract". Volume is optional so callers/tests that don't supply it
-    still work (they're treated as liquid).
+    above 0 and (when require_volume is set and the volume is known) non-zero day
+    volume. This drops the dead/illiquid far-OTM strikes that 5paisa rejects with
+    "Trading not allowed in illiquid contract".
+
+    require_volume:
+      * True (default) — the historical behaviour, used where there is no other
+        liquidity backstop (e.g. the paper path). Volume 0 => not liquid.
+      * False — volume is only a SOFT signal: a 0-volume strike is kept so the
+        caller's authoritative live order-book (Market Depth) check can decide.
+        5paisa's own feed can report 0 volume even for a liquid instrument, so the
+        live path must not throw such a strike away before the depth check.
+
+    Volume is optional either way, so callers/tests that don't supply it still work.
     """
     def _n(v):
         try:
@@ -52,24 +61,29 @@ def _is_liquid(opt):
 
     if _n(opt.get("premium")) <= 0:
         return False
-    if "volume" in opt and _n(opt.get("volume")) <= 0:
+    if require_volume and "volume" in opt and _n(opt.get("volume")) <= 0:
         return False
     return True
 
 
-def find_pe_candidates(option_chain, ce_sell_premium):
+def find_pe_candidates(option_chain, ce_sell_premium, require_volume=True):
     """
     All tradeable PE strikes whose premium is below the CE sell premium, ranked from
     highest premium (closest to CE) down. The caller can walk this list and confirm
     real order-book liquidity (Market Depth) on each before placing, falling through
     to the next-best one if a strike has no live offers.
 
+    require_volume: pass False from a caller that follows up with a live order-book
+    (Market Depth) check, so 0-volume strikes aren't dropped prematurely. See
+    _is_liquid for details.
+
     option_chain: [{"strike", "premium", "type", "volume"(optional)}, ...]
     Returns: list of dicts sorted by premium descending (may be empty).
     """
     valid = [
         opt for opt in option_chain
-        if opt["type"] == "PE" and opt["premium"] < ce_sell_premium and _is_liquid(opt)
+        if opt["type"] == "PE" and opt["premium"] < ce_sell_premium
+        and _is_liquid(opt, require_volume=require_volume)
     ]
     return sorted(valid, key=lambda x: x["premium"], reverse=True)
 
