@@ -27,6 +27,12 @@ LIMIT_ORDER_BUFFER_CHEAP = 0.01      # 1%  for LTP <= ₹100
 LIMIT_ORDER_BUFFER = 0.005           # 0.5% for LTP >  ₹100
 CHEAP_PRICE_THRESHOLD = 100
 
+# After placing the exit (square-off) orders we wait this long before re-reading the
+# broker's net positions, so the exchange has time to fill the marketable-limit
+# orders. We trust the *position* read (not the "order accepted" reply) as the
+# authoritative proof that a leg is actually flat before marking a trade closed.
+SQUAREOFF_SETTLE_SECONDS = 3
+
 
 def _round_tick(price):
     """Round to the nearest ₹0.05 tick (exchange requirement) and 2 decimals."""
@@ -59,17 +65,33 @@ def _marketable_limit_price(ltp, side):
     return _round_tick(ltp * factor)
 
 
-def _leg_ltp(settings, scrip_code):
-    """Fetch the current LTP for a single F&O leg, or None."""
+def _leg_ltp(db, settings, scrip_code, leg=""):
+    """
+    Fetch the current LTP for a single F&O leg, or None. Every failure mode is
+    logged with a [SQUAREOFF:LTP] tag so a missing exit price can be traced to the
+    exact leg and reason (no quote / fetch failed / empty result).
+    """
+    tag = f"[SQUAREOFF:LTP {leg} ({scrip_code})]"
     if not scrip_code:
+        _save_log(db, "WARNING", f"{tag} no scrip code - cannot fetch exit LTP")
         return None
-    q = fivepaisa.get_market_quote(
-        settings.access_token,
-        [{"exchange": "N", "exchange_type": "D", "scrip_code": scrip_code}]
-    )
-    if q["success"] and q.get("quotes"):
-        return q["quotes"][0]["LastRate"]
-    return None
+    try:
+        q = fivepaisa.get_market_quote(
+            settings.access_token,
+            [{"exchange": "N", "exchange_type": "D", "scrip_code": scrip_code}]
+        )
+    except Exception as e:
+        _save_log(db, "ERROR", f"{tag} get_market_quote CRASHED - {_exc_detail(e)}")
+        return None
+    if not q.get("success"):
+        _save_log(db, "ERROR", f"{tag} quote fetch FAILED - {q.get('error')}")
+        return None
+    if not q.get("quotes"):
+        _save_log(db, "ERROR", f"{tag} quote fetch returned NO quotes - cannot price exit")
+        return None
+    ltp = q["quotes"][0]["LastRate"]
+    _save_log(db, "INFO", f"{tag} LTP = {ltp}")
+    return ltp
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -1192,16 +1214,54 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
     )
 
     if current_pnl >= trade.profit_target:
+        _save_log(db, "INFO",
+            f"[MONITOR {trade.stock_name} #{trade.id}] PROFIT target hit: "
+            f"P&L {current_pnl} >= target {trade.profit_target} -> closing")
         _close_trade(db, settings, trade, reason="profit",
                      current_prices=(current_futures, current_ce, current_pe))
     elif current_pnl <= -trade.loss_limit:
+        _save_log(db, "INFO",
+            f"[MONITOR {trade.stock_name} #{trade.id}] LOSS limit hit: "
+            f"P&L {current_pnl} <= -limit {trade.loss_limit} -> closing")
         _close_trade(db, settings, trade, reason="loss",
                      current_prices=(current_futures, current_ce, current_pe))
 
 
-def _square_off_legs(db, settings, trade: Trade):
+def _open_scrip_codes(db, settings, stock_name):
     """
-    Close a filled position by placing opposite-side marketable-limit orders (square off).
+    Ground-truth set of scrip codes that still hold a NON-ZERO net position at
+    5paisa (V2/NetPositionNetWise) — the same signal position_sync uses. This is how
+    we confirm a square-off ACTUALLY happened rather than trusting the broker's
+    "order accepted" reply (accepted != filled).
+
+    Returns:
+      set(...) -> scrip codes currently open (may be empty = everything flat).
+      None     -> the position list could NOT be fetched. Callers must treat None as
+                  "unknown" and NOT mark a trade closed on it.
+    """
+    tag = f"[SQUAREOFF:POSCHECK {stock_name}]"
+    try:
+        result = fivepaisa.get_positions(settings.access_token, settings.client_code)
+    except Exception as e:
+        _save_log(db, "ERROR", f"{tag} get_positions CRASHED - {_exc_detail(e)}")
+        return None
+    if not result.get("success"):
+        _save_log(db, "ERROR", f"{tag} get_positions FAILED - {result.get('error')}")
+        return None
+    open_codes = set()
+    for position in result.get("positions", []):
+        code = str(position.get("ScripCode", ""))
+        net_qty = position.get("NetQty", 0)
+        if code and net_qty != 0:
+            open_codes.add(code)
+    _save_log(db, "INFO", f"{tag} broker open net positions: {sorted(open_codes) or 'none'}")
+    return open_codes
+
+
+def _square_off_legs(db, settings, trade: Trade) -> bool:
+    """
+    Close a filled position by placing opposite-side marketable-limit orders AND
+    confirming each leg is actually flat at 5paisa before reporting success.
 
     Filled positions can't be "cancelled" — they must be reversed with an opposite
     order (priced as a marketable limit per the broker's no-market-order rule).
@@ -1209,35 +1269,119 @@ def _square_off_legs(db, settings, trade: Trade):
         Futures = Buy, CE = Sell, PE = Buy
     so the exits are the opposite:
         Futures = Sell, CE = Buy, PE = Sell
-    Same scrip code, same quantity, same product type (delivery, IsIntraday=False)
-    so the broker nets each leg to zero. Only legs that were actually opened
-    (scrip code present) are squared off, so this also handles the naked-CE trade.
+    Only legs that were actually opened (scrip code present) are squared off, so this
+    also handles the naked-CE trade.
+
+    Returns:
+      True  -> every opened leg is VERIFIED flat at the broker (NetQty 0 / absent).
+      False -> at least one leg could NOT be confirmed closed (order rejected, not
+               filled, price/quote failure, or broker unreachable). The caller MUST
+               keep the trade OPEN so the dashboard matches reality and the de-dup
+               guard keeps blocking a duplicate real-money trade.
+
+    Idempotent: a leg already flat at the broker is NOT re-squared, so a retry can
+    never flip the position to the opposite side. Every step is logged with a
+    [SQUAREOFF] tag so a failure can be traced to the exact leg and reason.
     """
+    tag = f"[SQUAREOFF {trade.stock_name} #{trade.id}]"
     lot_size = trade.lot_size or 1
+    _save_log(db, "INFO",
+        f"{tag} STEP 1/5 start. lot_size={lot_size}, legs: "
+        f"FUT={trade.futures_scrip_code}, CE={trade.ce_scrip_code}, PE={trade.pe_scrip_code}")
+
     square_offs = [
         (trade.futures_scrip_code, "S", "FUT"),
         (trade.ce_scrip_code, "B", "CE"),
         (trade.pe_scrip_code, "S", "PE"),
     ]
-    for scrip_code, side, leg in square_offs:
-        if not scrip_code:
+    legs = [(str(code), side, leg) for code, side, leg in square_offs if code]
+    if not legs:
+        _save_log(db, "WARNING", f"{tag} no legs with a scrip code - nothing to square off (treating as flat)")
+        return True
+
+    # STEP 2 — ground truth BEFORE we touch anything: which legs are still open.
+    _save_log(db, "INFO", f"{tag} STEP 2/5 reading broker positions (pre-square-off)")
+    open_codes = _open_scrip_codes(db, settings, trade.stock_name)
+    if open_codes is None:
+        _save_log(db, "ERROR",
+            f"{tag} STEP 2/5 FAILED - cannot read positions; aborting square-off, trade stays OPEN")
+        return False
+
+    # STEP 3 — place an opposite order for every leg that is STILL open.
+    for scrip_code, side, leg in legs:
+        leg_tag = f"{tag} STEP 3/5 [{leg} {scrip_code} {side}]"
+        if scrip_code not in open_codes:
+            _save_log(db, "INFO", f"{leg_tag} already flat at broker - skipping (idempotent)")
             continue
-        price = _marketable_limit_price(_leg_ltp(settings, scrip_code), side)
-        result = fivepaisa.place_order(
-            settings.access_token, "N", "D", scrip_code, side, price, lot_size, False,
-            generate_remote_order_id(f"{trade.stock_name}_{leg}_EXIT")
-        )
-        if not result["success"]:
-            _save_log(db, "ERROR", f"{trade.stock_name}: failed to square off {leg} leg ({scrip_code}) - {result['error']}")
+        ltp = _leg_ltp(db, settings, scrip_code, leg)
+        price = _marketable_limit_price(ltp, side)
+        if price == 0:
+            _save_log(db, "ERROR",
+                f"{leg_tag} could not derive a valid exit price (ltp={ltp}); a 0 limit would not "
+                "fill - skipping placement, will retry next monitor cycle")
+            continue
+        _save_log(db, "INFO", f"{leg_tag} placing exit order @ {price} (ltp={ltp})")
+        try:
+            result = fivepaisa.place_order(
+                settings.access_token, "N", "D", scrip_code, side, price, lot_size, False,
+                generate_remote_order_id(f"{trade.stock_name}_{leg}_EXIT")
+            )
+        except Exception as e:
+            _save_log(db, "ERROR", f"{leg_tag} place_order CRASHED - {_exc_detail(e)}")
+            continue
+        if not result.get("success"):
+            _save_log(db, "ERROR", f"{leg_tag} exit order REJECTED by broker - {result.get('error')}")
         else:
-            _save_log(db, "INFO", f"{trade.stock_name}: squared off {leg} leg ({scrip_code}) with {side}")
+            _save_log(db, "INFO",
+                f"{leg_tag} exit order accepted (broker_order_id={result.get('broker_order_id')}) "
+                "- accepted is NOT a fill, confirming via positions next")
+
+    # STEP 4 — let the exchange settle, then re-read positions: the AUTHORITATIVE
+    # check. An accepted order is not a guaranteed fill, so we only trust positions.
+    _save_log(db, "INFO",
+        f"{tag} STEP 4/5 waiting {SQUAREOFF_SETTLE_SECONDS}s then re-reading positions (post-square-off)")
+    time.sleep(SQUAREOFF_SETTLE_SECONDS)
+    open_codes = _open_scrip_codes(db, settings, trade.stock_name)
+    if open_codes is None:
+        _save_log(db, "ERROR",
+            f"{tag} STEP 4/5 FAILED - cannot re-read positions to confirm; trade stays OPEN")
+        return False
+
+    # STEP 5 — verdict: every leg must be flat at the broker.
+    still_open = [leg for scrip_code, _side, leg in legs if scrip_code in open_codes]
+    if still_open:
+        _save_log(db, "ERROR",
+            f"{tag} STEP 5/5 square-off NOT confirmed - still OPEN at broker: {', '.join(still_open)}. "
+            "Trade kept OPEN, will retry next monitor cycle.")
+        return False
+    _save_log(db, "INFO", f"{tag} STEP 5/5 SUCCESS - all legs confirmed flat at broker.")
+    return True
 
 
 def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
-    """Square off all open legs on 5paisa and mark trade as closed in database."""
+    """
+    Square off all open legs on 5paisa and mark the trade closed ONLY when the
+    broker position is verified flat. A real trade whose square-off cannot be
+    confirmed is kept OPEN (and the client alerted) so the bot never reports a
+    position closed while it is still live at the broker — which previously let a
+    duplicate real-money trade slip past the de-dup guard.
+    """
+    tag = f"[CLOSE {trade.stock_name} #{trade.id}]"
+    _save_log(db, "INFO", f"{tag} exit triggered. reason={reason}, paper={trade.is_paper_trade}")
 
     if not trade.is_paper_trade:
-        _square_off_legs(db, settings, trade)
+        squared_off = _square_off_legs(db, settings, trade)
+        if not squared_off:
+            _save_log(db, "ERROR",
+                f"{tag} square-off NOT confirmed - keeping trade OPEN and alerting client. "
+                "Will retry on the next monitor cycle.")
+            db.commit()
+            try:
+                from notifications.email import send_squareoff_failed_email
+                send_squareoff_failed_email(trade.stock_name, reason)
+            except Exception as e:
+                _save_log(db, "WARNING", f"{tag} square-off-failed alert email failed - {_exc_detail(e)}")
+            return
 
     if current_prices:
         trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = current_prices
@@ -1252,14 +1396,14 @@ def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
     trade.close_reason = reason
     trade.closed_at = get_ist_now()
 
-    _save_log(db, "INFO", f"Trade {trade.id} ({trade.stock_name}) closed. Reason: {reason}. P&L: {trade.pnl}")
+    _save_log(db, "INFO", f"{tag} CONFIRMED CLOSED. reason={reason}, P&L={trade.pnl}")
     db.commit()
 
     try:
         from notifications.email import send_trade_closed_email
         send_trade_closed_email(trade.stock_name, reason, trade.pnl)
     except Exception as e:
-        _save_log(db, "WARNING", f"Email failed for trade close {trade.stock_name}: {str(e)}")
+        _save_log(db, "WARNING", f"{tag} email failed for trade close - {_exc_detail(e)}")
 
 
 # ─── Safety Check ─────────────────────────────────────────────────────────────

@@ -184,6 +184,43 @@ def test_get_positions_success(mock_post):
     assert result["positions"][0]["ScripCode"] == "1660"
 
 @patch("broker.fivepaisa.requests.post")
+def test_get_positions_invalid_session_is_failure(mock_post):
+    """
+    On an expired token 5paisa returns head.status '0' (looks OK) but body.Status 9
+    'Invalid Session' with an EMPTY NetPositionDetail. That empty list is identical
+    to a flat account, so get_positions MUST report failure — otherwise the
+    square-off / sync logic would treat 'couldn't read' as 'no open position' and
+    wrongly mark live trades closed.
+    """
+    invalid_session = {
+        "head": {"responseCode": "5PNPNWV2", "status": "0", "statusDescription": "Invalid Session"},
+        "body": {"Message": "Invalid Session", "NetPositionDetail": [], "Status": 9},
+    }
+    mock_post.return_value = MagicMock(
+        status_code=200, json=lambda: invalid_session, raise_for_status=lambda: None
+    )
+    result = get_positions("expired_token", "TEST001")
+    assert result["success"] is False
+    assert "Invalid Session" in result["error"]
+
+
+@patch("broker.fivepaisa.requests.post")
+def test_get_positions_no_record_is_flat(mock_post):
+    """body.Status 1 = 'No record found' is a genuinely flat account → success with
+    an empty positions list (NOT an error)."""
+    no_record = {
+        "head": {"status": "0", "statusDescription": "Success"},
+        "body": {"Message": "No record found", "NetPositionDetail": [], "Status": 1},
+    }
+    mock_post.return_value = MagicMock(
+        status_code=200, json=lambda: no_record, raise_for_status=lambda: None
+    )
+    result = get_positions("fake_token", "TEST001")
+    assert result["success"] is True
+    assert result["positions"] == []
+
+
+@patch("broker.fivepaisa.requests.post")
 def test_get_market_quote_success(mock_post):
     mock_post.return_value = MagicMock(
         status_code=200,

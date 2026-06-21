@@ -104,6 +104,41 @@ def send_partial_fill_alert(stock_name: str, filled_legs: list, failed_legs: lis
     _send_email(subject, body)
 
 
+def send_squareoff_failed_email(stock_name: str, reason: str):
+    """
+    URGENT alert: a profit/stop/expiry target was hit so the bot tried to square the
+    position OFF, but it could NOT confirm the position is actually flat at 5paisa.
+
+    The bot has deliberately KEPT the trade OPEN on the dashboard (it keeps retrying
+    the square-off each monitor cycle) precisely so it does NOT report a closed
+    position while the real-money position is still live — and so the de-dup guard
+    keeps a duplicate trade from being placed. The client should check 5paisa and
+    square the position off manually if it is still showing open.
+    """
+    reason_labels = {
+        "profit": "Profit Target Hit",
+        "loss": "Loss Limit Hit",
+        "expiry": "Expiry Close",
+    }
+    label = reason_labels.get(reason, reason)
+    subject = f"🚨 ACTION NEEDED: Square-off NOT confirmed on {stock_name}"
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;">
+    <h2 style="color:#e74c3c;">🚨 Square-off NOT confirmed — Check 5paisa</h2>
+    <p><b>{stock_name}</b>: the <b>{label}</b> triggered and the bot placed the
+    square-off (closing) orders, but it could <b>NOT</b> confirm the position is flat
+    at 5paisa.</p>
+    <p>The bot has <b>kept this trade OPEN</b> on the dashboard and will keep retrying
+    the square-off automatically. It will <b>not</b> mark the trade closed until the
+    broker confirms the position is flat, and it will <b>not</b> place a duplicate
+    trade while this one is open.</p>
+    <p style="color:#e74c3c;"><b>Please check your 5paisa account now</b> and square
+    the position off manually if it is still showing open.</p>
+    </body></html>
+    """
+    _send_email(subject, body)
+
+
 def send_trade_opened_email(stock_name: str, futures_price: float, ce_strike: float,
                              ce_premium: float, pe_strike: float, pe_premium: float):
     """Send email when a new trade position is opened."""

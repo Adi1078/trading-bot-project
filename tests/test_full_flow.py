@@ -513,6 +513,111 @@ def test_monitor_holds_open_when_within_limits(mock_now, mock_broker):
     mock_broker.cancel_order.assert_not_called()
 
 
+# ── Square-off verification (real-money safety) ─────────────────────────────────
+
+def positions_resp(*open_scrip_codes):
+    """NetPositionNetWise response where the given scrip codes still hold an open
+    net qty. Call with no args for a fully flat account."""
+    return {
+        "success": True,
+        "positions": [{"ScripCode": c, "NetQty": 1} for c in open_scrip_codes],
+    }
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_keeps_trade_open_when_not_confirmed_flat(mock_now, mock_broker):
+    """
+    Profit target hits and the exit orders are ACCEPTED, but the broker still shows
+    the legs open afterwards (the marketable-limit orders never filled). The trade
+    MUST stay open (so the de-dup guard blocks a duplicate real-money trade) and the
+    client must be alerted. This is the exact RVNL failure mode.
+    """
+    add(make_settings(), make_open_trade(profit_target=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # profit
+    mock_broker.place_order.return_value = order_ok(999)  # accepted...
+    # ...but positions ALWAYS show every leg still open -> never confirmed flat.
+    mock_broker.get_positions.return_value = positions_resp(
+        "INFY_FUT", "INFY_CE_1150", "INFY_PE_1100")
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_squareoff_failed_email") as mock_alert:
+                with patch("notifications.email.send_trade_closed_email") as mock_closed:
+                    trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.status == "open", "must NOT mark closed while position is still live"
+    assert trade.close_reason is None
+    mock_alert.assert_called_once()          # client warned to check 5paisa
+    mock_closed.assert_not_called()          # never send a 'closed' email
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_marks_closed_when_positions_confirm_flat(mock_now, mock_broker):
+    """Profit hits, exit orders fill, and the broker confirms the legs are flat →
+    the trade is marked closed with the live exit P&L."""
+    add(make_settings(), make_open_trade(profit_target=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)
+    mock_broker.place_order.return_value = order_ok(999)
+    # Pre-check: all three legs open. Post-check: account flat.
+    mock_broker.get_positions.side_effect = [
+        positions_resp("INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"),
+        positions_resp(),  # flat
+    ]
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_trade_closed_email"):
+                trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.status == "closed"
+    assert trade.close_reason == "profit"
+    assert trade.pnl > 20
+    assert mock_broker.place_order.call_count == 3  # all 3 legs squared off
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_is_idempotent_skips_already_flat_legs(mock_now, mock_broker):
+    """
+    A leg already flat at the broker (e.g. a previous attempt's exit has since
+    filled) must NOT be re-squared — otherwise a retry would flip it to the opposite
+    side. Only the still-open legs get an exit order.
+    """
+    add(make_settings(), make_open_trade(profit_target=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)
+    mock_broker.place_order.return_value = order_ok(999)
+    # Pre-check: PE already flat (only FUT+CE open). Post-check: fully flat.
+    mock_broker.get_positions.side_effect = [
+        positions_resp("INFY_FUT", "INFY_CE_1150"),
+        positions_resp(),
+    ]
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_trade_closed_email"):
+                trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.status == "closed"
+    # Only FUT and CE were re-squared; the already-flat PE leg was skipped.
+    assert mock_broker.place_order.call_count == 2
+    squared_scrips = [call.args[3] for call in mock_broker.place_order.call_args_list]
+    assert "INFY_PE_1100" not in squared_scrips
+
+
 # ── Safety Check ──────────────────────────────────────────────────────────────
 
 @patch("bot.trade_manager.fivepaisa")

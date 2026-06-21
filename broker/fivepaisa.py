@@ -269,11 +269,26 @@ def get_positions(access_token, client_code):
         response.raise_for_status()
         data = response.json()
 
-        if _head_ok(data):
-            return {"success": True, "positions": data["body"]["NetPositionDetail"]}
+        if not _head_ok(data):
+            logger.error(f"get_positions failed: {_head_error(data)}")
+            return {"success": False, "error": _head_error(data)}
 
-        logger.error(f"get_positions failed: {_head_error(data)}")
-        return {"success": False, "error": _head_error(data)}
+        # CRITICAL: NetPositionNetWise returns head.status == "0" even on an
+        # "Invalid Session" — the real outcome is in body.Status:
+        #   0 = Success, 1 = No record found (genuinely flat), 9 = Invalid Session.
+        # On an invalid session body.NetPositionDetail is [] which is identical to a
+        # flat account, so trusting head alone would make an expired token look like
+        # "no open positions" — and the square-off / sync logic would then wrongly
+        # mark live trades closed. Only 0 and 1 are real successes; anything else
+        # (esp. 9) is a failure so callers treat it as "unknown", not "flat".
+        body = data.get("body") or {}
+        body_status = body.get("Status", 0)
+        if str(body_status) not in ("0", "1"):
+            err = body.get("Message") or f"NetPosition body.Status={body_status}"
+            logger.error(f"get_positions body error: {err}")
+            return {"success": False, "error": err}
+
+        return {"success": True, "positions": body.get("NetPositionDetail") or []}
 
     except Exception as e:
         logger.error(f"get_positions exception: {e}", exc_info=True)
