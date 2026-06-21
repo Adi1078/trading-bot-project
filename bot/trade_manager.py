@@ -33,6 +33,15 @@ CHEAP_PRICE_THRESHOLD = 100
 # authoritative proof that a leg is actually flat before marking a trade closed.
 SQUAREOFF_SETTLE_SECONDS = 3
 
+# When a square-off can't be confirmed flat at the broker we retry — but never on
+# every ~10s monitor cycle. We retry at most SQUAREOFF_MAX_ATTEMPTS times, spaced at
+# least SQUAREOFF_RETRY_SECONDS apart, and only while a target is still hit (the
+# monitor re-checks live P&L each cycle, so a price that drifts back to neutral
+# simply stops the retries and the trade behaves like a normal open trade again).
+# The client is emailed only once — on the first failure.
+SQUAREOFF_RETRY_SECONDS = 120     # 2 minutes between retry attempts
+SQUAREOFF_MAX_ATTEMPTS = 3        # "2-3 times" then leave it for manual close
+
 
 def _round_tick(price):
     """Round to the nearest ₹0.05 tick (exchange requirement) and 2 decimals."""
@@ -1367,21 +1376,58 @@ def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
     duplicate real-money trade slip past the de-dup guard.
     """
     tag = f"[CLOSE {trade.stock_name} #{trade.id}]"
-    _save_log(db, "INFO", f"{tag} exit triggered. reason={reason}, paper={trade.is_paper_trade}")
 
     if not trade.is_paper_trade:
+        # ── Retry gating ──────────────────────────────────────────────────────
+        # Don't hammer a failing square-off every ~10s. Retry at most
+        # SQUAREOFF_MAX_ATTEMPTS times, spaced SQUAREOFF_RETRY_SECONDS apart. We are
+        # only called while a target is still hit (the monitor re-checks live P&L
+        # each cycle), so if the price drifts back to neutral we simply stop being
+        # called and the trade behaves like a normal open trade.
+        now = get_ist_now()
+        attempts = trade.squareoff_attempts or 0
+
+        if attempts >= SQUAREOFF_MAX_ATTEMPTS:
+            _save_log(db, "WARNING",
+                f"{tag} square-off already attempted {attempts}x (max {SQUAREOFF_MAX_ATTEMPTS}) - "
+                "not retrying automatically; awaiting manual close / 5-min position sync")
+            return
+
+        if attempts >= 1 and trade.last_squareoff_attempt_at:
+            elapsed = (now - trade.last_squareoff_attempt_at).total_seconds()
+            if elapsed < SQUAREOFF_RETRY_SECONDS:
+                _save_log(db, "INFO",
+                    f"{tag} square-off cooldown: {int(elapsed)}s since last attempt "
+                    f"(retry after {SQUAREOFF_RETRY_SECONDS}s) - skipping this cycle")
+                return
+
+        # Record this attempt before placing anything.
+        trade.squareoff_attempts = attempts + 1
+        trade.last_squareoff_attempt_at = now
+        db.commit()
+        _save_log(db, "INFO",
+            f"{tag} exit triggered. reason={reason}, square-off attempt "
+            f"{trade.squareoff_attempts}/{SQUAREOFF_MAX_ATTEMPTS}")
+
         squared_off = _square_off_legs(db, settings, trade)
         if not squared_off:
             _save_log(db, "ERROR",
-                f"{tag} square-off NOT confirmed - keeping trade OPEN and alerting client. "
-                "Will retry on the next monitor cycle.")
+                f"{tag} square-off attempt {trade.squareoff_attempts}/{SQUAREOFF_MAX_ATTEMPTS} "
+                "NOT confirmed - trade kept OPEN.")
+            # Alert the client ONCE — on the first failure only.
+            if not trade.squareoff_alerted:
+                trade.squareoff_alerted = True
+                db.commit()
+                try:
+                    from notifications.email import send_squareoff_failed_email
+                    send_squareoff_failed_email(trade.stock_name, reason)
+                    _save_log(db, "INFO", f"{tag} square-off-failed alert emailed to client (first failure)")
+                except Exception as e:
+                    _save_log(db, "WARNING", f"{tag} square-off-failed alert email failed - {_exc_detail(e)}")
             db.commit()
-            try:
-                from notifications.email import send_squareoff_failed_email
-                send_squareoff_failed_email(trade.stock_name, reason)
-            except Exception as e:
-                _save_log(db, "WARNING", f"{tag} square-off-failed alert email failed - {_exc_detail(e)}")
             return
+    else:
+        _save_log(db, "INFO", f"{tag} exit triggered. reason={reason}, paper=True")
 
     if current_prices:
         trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = current_prices

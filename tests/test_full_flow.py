@@ -618,6 +618,91 @@ def test_squareoff_is_idempotent_skips_already_flat_legs(mock_now, mock_broker):
     assert "INFY_PE_1100" not in squared_scrips
 
 
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_not_retried_within_cooldown_and_emails_once(mock_now, mock_broker):
+    """
+    Two monitor cycles in quick succession (same minute) while the square-off keeps
+    failing must NOT place a second round of exit orders, and must email the client
+    only ONCE — no every-10s flood.
+    """
+    add(make_settings(), make_open_trade(profit_target=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # profit
+    mock_broker.place_order.return_value = order_ok(999)
+    mock_broker.get_positions.return_value = positions_resp(
+        "INFY_FUT", "INFY_CE_1150", "INFY_PE_1100")  # never goes flat -> always fails
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_squareoff_failed_email") as mock_alert:
+                trade_manager.monitor_open_trades()   # cycle 1 -> attempt 1
+                trade_manager.monitor_open_trades()   # cycle 2 -> cooldown, skip
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.status == "open"
+    assert trade.squareoff_attempts == 1          # only ONE attempt despite two cycles
+    assert mock_broker.place_order.call_count == 3  # 3 legs, one attempt only
+    mock_alert.assert_called_once()                # client emailed exactly once
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_retries_after_cooldown_without_second_email(mock_now, mock_broker):
+    """After the 2-minute cooldown a still-hit target retries the square-off, but the
+    client is NOT emailed again (already alerted on the first failure)."""
+    trade = make_open_trade(profit_target=20)
+    trade.squareoff_attempts = 1
+    trade.squareoff_alerted = True
+    trade.last_squareoff_attempt_at = datetime(2026, 5, 20, 10, 27)  # 3 min before 'now'
+    add(make_settings(), trade)
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # profit still hit
+    mock_broker.place_order.return_value = order_ok(999)
+    mock_broker.get_positions.return_value = positions_resp(
+        "INFY_FUT", "INFY_CE_1150", "INFY_PE_1100")
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_squareoff_failed_email") as mock_alert:
+                trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.squareoff_attempts == 2          # retried
+    assert mock_broker.place_order.called          # exit orders placed again
+    mock_alert.assert_not_called()                 # no second email
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_gives_up_after_max_attempts(mock_now, mock_broker):
+    """Once the max attempts are used up the bot stops auto-retrying — it places no
+    further exit orders and leaves the trade open for manual close / position sync."""
+    trade = make_open_trade(profit_target=20)
+    trade.squareoff_attempts = 3                   # == SQUAREOFF_MAX_ATTEMPTS
+    trade.squareoff_alerted = True
+    trade.last_squareoff_attempt_at = datetime(2026, 5, 20, 10, 20)  # well past cooldown
+    add(make_settings(), trade)
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # still profit
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_squareoff_failed_email") as mock_alert:
+            trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+
+    assert trade.status == "open"
+    assert trade.squareoff_attempts == 3           # not incremented further
+    mock_broker.place_order.assert_not_called()    # no more exit orders
+    mock_alert.assert_not_called()
+
+
 # ── Safety Check ──────────────────────────────────────────────────────────────
 
 @patch("bot.trade_manager.fivepaisa")

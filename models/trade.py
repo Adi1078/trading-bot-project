@@ -40,3 +40,11 @@ class Trade(Base):
     pnl = Column(Float, nullable=True)
     placed_at = Column(DateTime, default=get_ist_now)
     closed_at = Column(DateTime, nullable=True)
+
+    # Square-off retry bookkeeping. When an exit (profit/loss/expiry) can't be
+    # confirmed flat at the broker, the bot retries a limited number of times spaced
+    # apart (instead of hammering every ~10s monitor cycle) and emails the client
+    # only once. See _close_trade.
+    squareoff_attempts = Column(Integer, default=0)
+    last_squareoff_attempt_at = Column(DateTime, nullable=True)
+    squareoff_alerted = Column(Boolean, default=False)

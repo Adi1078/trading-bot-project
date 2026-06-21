@@ -41,6 +41,9 @@ def _ensure_columns():
         },
         "trades": {
             "expiry_date": "VARCHAR",
+            "squareoff_attempts": "INTEGER DEFAULT 0",
+            "last_squareoff_attempt_at": "DATETIME",
+            "squareoff_alerted": "BOOLEAN DEFAULT 0",
         },
     }
     try:

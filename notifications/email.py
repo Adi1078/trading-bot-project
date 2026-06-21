@@ -128,10 +128,11 @@ def send_squareoff_failed_email(stock_name: str, reason: str):
     <p><b>{stock_name}</b>: the <b>{label}</b> triggered and the bot placed the
     square-off (closing) orders, but it could <b>NOT</b> confirm the position is flat
     at 5paisa.</p>
-    <p>The bot has <b>kept this trade OPEN</b> on the dashboard and will keep retrying
-    the square-off automatically. It will <b>not</b> mark the trade closed until the
-    broker confirms the position is flat, and it will <b>not</b> place a duplicate
-    trade while this one is open.</p>
+    <p>The bot has <b>kept this trade OPEN</b> on the dashboard and will retry the
+    square-off a few more times automatically (a couple of minutes apart). It will
+    <b>not</b> mark the trade closed until the broker confirms the position is flat,
+    and it will <b>not</b> place a duplicate trade while this one is open. You are
+    receiving this alert only once.</p>
     <p style="color:#e74c3c;"><b>Please check your 5paisa account now</b> and square
     the position off manually if it is still showing open.</p>
     </body></html>
