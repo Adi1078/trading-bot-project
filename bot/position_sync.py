@@ -1,12 +1,19 @@
 import logging
+from datetime import timedelta
 from database import SessionLocal
 from models.trade import Trade
 from models.settings import Settings
 from models.log import Log
 from broker import fivepaisa
-from utils.helpers import get_ist_now
+from utils.helpers import get_ist_now, calculate_trade_pnl
 
 logger = logging.getLogger(__name__)
+
+# A freshly placed trade is NOT reconciled until it is at least this old. Right
+# after a market-open entry, 5paisa's NetPositionNetWise feed lags and may not yet
+# list the just-opened position, which previously made the reconciler conclude the
+# client had "manually closed" a live trade within a minute of it opening.
+SYNC_GRACE_MINUTES = 15
 
 
 def _save_log(db, level: str, message: str):
@@ -47,6 +54,21 @@ def sync_positions():
 
         live_positions = result.get("positions", [])
 
+        # CRITICAL SAFETY GUARD: an EMPTY positions snapshot is never treated as
+        # "the client closed everything". 5paisa returns an empty NetPositionNetWise
+        # list both when the account is genuinely flat AND, transiently, right after
+        # a market-open entry (feed lag) or on a "no record found" response — the two
+        # are indistinguishable. Concluding a manual close from an empty snapshot is
+        # what falsely closed live trades within a minute of opening (and with no
+        # P&L). We only ever trust an *absence* when the feed is alive and returning
+        # OTHER positions, so the absence is real rather than a lagging/empty feed.
+        if not live_positions:
+            _save_log(db, "WARNING",
+                f"Position sync: 5paisa returned NO positions while {len(our_open_trades)} "
+                f"of our trades are open - treating as a lagging/empty feed, NOT a manual "
+                f"close. No trades changed.")
+            return
+
         # The Net Position response identifies positions by ScripCode + NetQty
         # (there is no OrderID). Build the set of scrip codes that still have an
         # open net quantity on 5paisa.
@@ -57,18 +79,53 @@ def sync_positions():
             if scrip_code and net_qty != 0:
                 open_scrip_codes.add(scrip_code)
 
+        now = get_ist_now()
+
         # Check each of our open trades
         for trade in our_open_trades:
+            # Grace period: a just-placed trade may not show in the feed yet.
+            if trade.placed_at and (now - trade.placed_at) < timedelta(minutes=SYNC_GRACE_MINUTES):
+                continue
+
             if _is_closed_on_broker(trade, open_scrip_codes):
+                # Record P&L from current prices so a genuine manual close isn't
+                # left blank (mirrors the profit/loss/expiry close path).
+                _record_manual_close_pnl(db, settings, trade)
+
                 trade.status = "closed"
                 trade.close_reason = "manual"
-                trade.closed_at = get_ist_now()
+                trade.closed_at = now
 
                 _save_log(db, "INFO",
-                    f"Position sync: trade {trade.id} ({trade.stock_name}) was closed on 5paisa by client, marking closed in database")
+                    f"Position sync: trade {trade.id} ({trade.stock_name}) is no longer "
+                    f"open on 5paisa (legs absent from a live, non-empty positions feed) - "
+                    f"marking closed (manual). P&L={trade.pnl}")
+                db.commit()
 
     finally:
         db.close()
+
+
+def _record_manual_close_pnl(db, settings, trade: Trade):
+    """
+    Fetch current leg prices and store exit prices + P&L on a trade the client
+    closed manually, so it doesn't show a blank P&L. Best-effort: if prices can't
+    be fetched we leave P&L blank rather than block the close.
+    """
+    try:
+        from bot.trade_manager import _fetch_current_prices
+        prices = _fetch_current_prices(db, settings, trade)
+        if not prices:
+            return
+        trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = prices
+        trade.pnl = calculate_trade_pnl(
+            trade.futures_entry_price, trade.futures_exit_price,
+            trade.ce_entry_price, trade.ce_exit_price,
+            trade.pe_entry_price, trade.pe_exit_price,
+            trade.lot_size,
+        )
+    except Exception as e:
+        logger.error(f"[SYNC:PNL] could not record P&L for trade {trade.id}: {e}", exc_info=True)
 
 
 def _is_closed_on_broker(trade: Trade, open_scrip_codes: set) -> bool:

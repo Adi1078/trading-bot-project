@@ -8,7 +8,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -1097,3 +1097,98 @@ def test_chartink_not_in_watchlist_logged_once_per_day():
     count = db.query(Log).filter(Log.message.contains("MAXHEALTH")).count()
     db.close()
     assert count == 1, f"MAXHEALTH should be logged once per day, got {count}"
+
+
+# ── Position reconciler (false "manual close" safety) ───────────────────────────
+# Regression guard for the bug where freshly-placed live trades were marked
+# "closed manually by client" within a minute of opening (broker positions feed
+# lags at market open) — with no P&L recorded.
+
+from bot import position_sync
+
+SYNC_NOW = datetime(2026, 5, 20, 11, 0, 0)
+
+
+def _aged_open_trade(minutes_old=60):
+    """An open trade placed `minutes_old` minutes before SYNC_NOW."""
+    t = make_open_trade()
+    t.placed_at = SYNC_NOW - timedelta(minutes=minutes_old)
+    return t
+
+
+@patch("bot.position_sync.fivepaisa")
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+def test_sync_does_not_close_on_empty_snapshot(mock_now, mock_broker):
+    """An EMPTY positions snapshot (feed lag / 'no record') must NEVER be read as
+    'the client closed everything' — the trade stays open."""
+    add(make_settings(), _aged_open_trade(minutes_old=60))
+    mock_broker.get_positions.return_value = positions_resp()  # success=True, []
+
+    with patch("bot.position_sync.SessionLocal", TestSession):
+        position_sync.sync_positions()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade.status == "open"
+    assert trade.close_reason is None
+
+
+@patch("bot.position_sync.fivepaisa")
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+def test_sync_skips_trade_inside_grace_period(mock_now, mock_broker):
+    """A just-placed trade (inside the grace window) is not reconciled even if its
+    legs aren't in a live, non-empty snapshot yet (open-time feed lag)."""
+    add(make_settings(), _aged_open_trade(minutes_old=2))
+    # Live feed is alive (has OTHER positions) but not our legs yet.
+    mock_broker.get_positions.return_value = positions_resp("SOMEONE_ELSE_FUT")
+
+    with patch("bot.position_sync.SessionLocal", TestSession):
+        position_sync.sync_positions()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade.status == "open"
+    assert trade.close_reason is None
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.position_sync.fivepaisa")
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+def test_sync_closes_when_legs_absent_from_live_feed_and_records_pnl(
+        mock_now, mock_pos_broker, mock_tm_broker):
+    """An aged trade whose legs are absent from a LIVE, non-empty snapshot is a real
+    manual close → marked closed (manual) AND P&L recorded (not blank)."""
+    add(make_settings(), _aged_open_trade(minutes_old=60))
+    mock_pos_broker.get_positions.return_value = positions_resp("SOMEONE_ELSE_FUT")
+    # P&L recording fetches current prices via trade_manager._fetch_current_prices.
+    mock_tm_broker.get_market_quote.return_value = multi_quote_ok(1130, 10.0, 12.0)
+
+    with patch("bot.position_sync.SessionLocal", TestSession):
+        position_sync.sync_positions()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade.status == "closed"
+    assert trade.close_reason == "manual"
+    assert trade.pnl is not None
+    assert trade.closed_at is not None
+
+
+@patch("bot.position_sync.fivepaisa")
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+def test_sync_keeps_trade_open_when_legs_present(mock_now, mock_broker):
+    """If our legs still hold an open net qty, the trade stays open."""
+    add(make_settings(), _aged_open_trade(minutes_old=60))
+    mock_broker.get_positions.return_value = positions_resp(
+        "INFY_FUT", "INFY_CE_1150", "INFY_PE_1100")
+
+    with patch("bot.position_sync.SessionLocal", TestSession):
+        position_sync.sync_positions()
+
+    db = TestSession()
+    trade = db.query(Trade).first()
+    db.close()
+    assert trade.status == "open"
