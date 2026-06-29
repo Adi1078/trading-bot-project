@@ -142,6 +142,14 @@ def fill_ok():
     return {"success": True, "orders": [{"Status": "Fully Executed"}]}
 
 
+def fill_ok_priced(avg_price, exch_id="EX123"):
+    """get_order_status response for a fully executed order WITH the real average
+    fill price + exchange order id (what the bot records as the true entry)."""
+    return {"success": True, "orders": [
+        {"Status": "Fully Executed", "AveragePrice": avg_price, "ExchOrderID": exch_id}
+    ]}
+
+
 def cancel_ok():
     return {"success": True}
 
@@ -771,6 +779,7 @@ def test_naked_ce_percent_strike_places_limit_order(mock_broker):
     mock_broker.get_option_chain.return_value = chain_ok(1160)
     mock_broker.get_lot_size.return_value = 400
     mock_broker.place_order.return_value = order_ok(555)
+    mock_broker.get_order_status.return_value = fill_ok()   # CE confirmed executed
 
     with patch("bot.trade_manager.SessionLocal", TestSession):
         with patch("notifications.email.send_trade_opened_email"):
@@ -1335,3 +1344,78 @@ def test_order_price_never_raises_on_depth_crash(mock_broker):
     price = _order_price(db, s, "X", "B", 20.0, "FUT")
     db.close()
     assert abs(price - 20.2) < 0.001, f"expected LTP fallback ~20.2, got {price}"
+
+
+# ── Record the REAL executed price + exchange trade id (client request #2) ───────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_collar_records_real_fill_price_and_exch_id(mock_broker):
+    """The collar records each leg's ACTUAL average fill price + exchange order id
+    (from OrderStatus), not the LTP it priced off."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.place_order.side_effect = [order_ok(111), order_ok(222), order_ok(333)]
+    # Each leg fills at a price DIFFERENT from the LTP, with its own exch id.
+    mock_broker.get_order_status.side_effect = [
+        fill_ok_priced(1130.5, "FUT-EX"),   # FUT
+        fill_ok_priced(6.25, "CE-EX"),      # CE
+        fill_ok_priced(9.4, "PE-EX"),       # PE
+    ]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    db = TestSession(); trade = db.query(Trade).first(); db.close()
+    assert trade is not None
+    assert trade.futures_entry_price == 1130.5 and trade.futures_exch_order_id == "FUT-EX"
+    assert trade.ce_entry_price == 6.25 and trade.ce_exch_order_id == "CE-EX"
+    assert trade.pe_entry_price == 9.4 and trade.pe_exch_order_id == "PE-EX"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_records_real_fill_price_and_exch_id(mock_broker):
+    """Naked CE records the real fill price + exch id (the MCX case: priced off a
+    stale LTP but fills at a different price)."""
+    add(make_settings(), make_watchlist(),
+        make_fixed_trade(strike_type="percent", strike_value=3, month_type="option"))
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1160)
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.place_order.return_value = order_ok(555)
+    mock_broker.get_order_status.return_value = fill_ok_priced(1.5, "MCX-EX")  # real fill 1.5
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        trade_manager.run_fixed_trades()
+
+    db = TestSession(); trade = db.query(Trade).first(); db.close()
+    assert trade is not None
+    assert trade.ce_entry_price == 1.5, f"should record real fill 1.5, got {trade.ce_entry_price}"
+    assert trade.ce_exch_order_id == "MCX-EX"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_not_recorded_if_not_executed(mock_broker):
+    """If the CE order is accepted but does NOT execute (rests away), the bot does
+    NOT record a live trade — it alerts the client instead."""
+    add(make_settings(), make_watchlist(),
+        make_fixed_trade(strike_type="percent", strike_value=3, month_type="option"))
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1160)
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.place_order.return_value = order_ok(555)               # accepted...
+    mock_broker.get_order_status.return_value = {"success": True, "orders": [{"Status": "Pending"}]}  # ...not filled
+    mock_broker.get_order_book.return_value = {"success": True, "orders": []}
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_partial_fill_alert") as mock_alert:
+            trade_manager.run_fixed_trades()
+
+    db = TestSession(); trade = db.query(Trade).first(); db.close()
+    assert trade is None, "an unexecuted CE must NOT be recorded as a live trade"
+    mock_alert.assert_called_once()

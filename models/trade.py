@@ -21,6 +21,12 @@ class Trade(Base):
     ce_broker_order_id = Column(String, nullable=True)
     pe_broker_order_id = Column(String, nullable=True)
 
+    # Exchange order IDs — the real "execution trade id" from the exchange, captured
+    # from OrderStatus/OrderBook once a leg is confirmed Fully Executed.
+    futures_exch_order_id = Column(String, nullable=True)
+    ce_exch_order_id = Column(String, nullable=True)
+    pe_exch_order_id = Column(String, nullable=True)
+
     futures_entry_price = Column(Float, nullable=True)
     ce_entry_price = Column(Float, nullable=True)
     pe_entry_price = Column(Float, nullable=True)

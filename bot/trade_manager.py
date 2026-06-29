@@ -273,13 +273,18 @@ def _confirm_fills(settings, db, stock_name, legs):
     gives the exchange time to process marketable-limit orders).
 
     legs: list of (remote_order_id, leg_name)
-    Returns (filled_legs, unfilled_legs) where each item is a leg_name string.
+    Returns (filled_legs, unfilled_legs, fills):
+      filled_legs/unfilled_legs are leg_name strings; fills is
+      {leg_name: {"price": <actual avg fill price or None>,
+                  "exch_order_id": <exchange order id or None>}} for filled legs,
+      read from the broker (OrderStatus AveragePrice + ExchOrderID) so the trade is
+      recorded at its REAL executed price/ID, not our intended/limit price.
 
     Status "Fully Executed" → filled. Anything else (Pending, Rejected by Exch,
     Cancelled, etc.) → unfilled → client must handle manually.
     """
     time.sleep(1)  # give the exchange 1 second to process
-    filled, unfilled = [], []
+    filled, unfilled, fills = [], [], {}
 
     # OrderStatus tells us the Status ("Rejected by Exch", "Pending", ...) but NOT
     # the reason. The OrderBook carries the broker/exchange REASON keyed by
@@ -325,8 +330,19 @@ def _confirm_fills(settings, db, stock_name, legs):
             # 5paisa may return multiple history entries per order (e.g. Modified → Fully Executed).
             # Check all entries — if any shows "Fully Executed" the order is filled.
             if any(o.get("Status") == "Fully Executed" for o in orders):
+                exec_rec = next((o for o in orders if o.get("Status") == "Fully Executed"), orders[-1])
+                avg_price = None
+                try:
+                    ap = float(exec_rec.get("AveragePrice") or 0)
+                    if ap > 0:
+                        avg_price = ap
+                except (TypeError, ValueError):
+                    avg_price = None
+                exch_id = str(exec_rec.get("ExchOrderID") or "") or None
+                fills[leg_name] = {"price": avg_price, "exch_order_id": exch_id}
                 _save_log(db, "INFO",
-                    f"{stock_name}: [{leg_name}] order status = Fully Executed ({len(orders)} record(s))")
+                    f"{stock_name}: [{leg_name}] order status = Fully Executed "
+                    f"(fill price {avg_price}, exch id {exch_id}, {len(orders)} record(s))")
                 filled.append(leg_name)
             else:
                 final_status = orders[-1].get("Status", "Unknown")  # most recent entry last
@@ -341,7 +357,7 @@ def _confirm_fills(settings, db, stock_name, legs):
                 f"{stock_name}: [{leg_name}] order-status check crashed — {_exc_detail(e)}")
             unfilled.append(f"{leg_name} (status-check crashed)")
 
-    return filled, unfilled
+    return filled, unfilled, fills
 
 
 def _pick_liquid_pe(db, settings, stock_name, option_chain, ce_premium, max_checks=6):
@@ -437,9 +453,9 @@ def _finalize_live_collar(db, settings, *, stock_name, trade_source, fixed_trade
             problems.append(f"{lg['name']}: {lg['result']['error']}")
 
     # 2. Real exchange fill confirmation for the accepted legs.
-    filled = []
+    filled, fills = [], {}
     if accepted:
-        filled, unfilled = _confirm_fills(settings, db, stock_name, accepted)
+        filled, unfilled, fills = _confirm_fills(settings, db, stock_name, accepted)
         if unfilled:
             problems.append(f"not fully executed: {', '.join(unfilled)}")
 
@@ -462,6 +478,17 @@ def _finalize_live_collar(db, settings, *, stock_name, trade_source, fixed_trade
     def _order_id(name):
         return str(by[name]["result"]["broker_order_id"]) if (name in filled and name in by) else None
 
+    def _entry_price(name):
+        # Prefer the REAL average fill price from the broker; fall back to the LTP we
+        # priced off only if the broker didn't report a fill price.
+        if name not in filled:
+            return None
+        real = (fills.get(name) or {}).get("price")
+        return real if (real and real > 0) else _field(name, "entry")
+
+    def _exch_id(name):
+        return (fills.get(name) or {}).get("exch_order_id") if name in filled else None
+
     trade = Trade(
         stock_name=stock_name.upper(),
         trade_source=trade_source,
@@ -475,9 +502,12 @@ def _finalize_live_collar(db, settings, *, stock_name, trade_source, fixed_trade
         futures_broker_order_id=_order_id("FUT"),
         ce_broker_order_id=_order_id("CE"),
         pe_broker_order_id=_order_id("PE"),
-        futures_entry_price=_field("FUT", "entry"),
-        ce_entry_price=_field("CE", "entry"),
-        pe_entry_price=_field("PE", "entry"),
+        futures_exch_order_id=_exch_id("FUT"),
+        ce_exch_order_id=_exch_id("CE"),
+        pe_exch_order_id=_exch_id("PE"),
+        futures_entry_price=_entry_price("FUT"),
+        ce_entry_price=_entry_price("CE"),
+        pe_entry_price=_entry_price("PE"),
         expiry_date=expiry_date,
         profit_target=profit_target,
         loss_limit=loss_limit,
@@ -784,16 +814,39 @@ def _place_option_trade(db, settings, ft: FixedTrade):
         return
 
     ce_order_id = None
+    ce_exch_id = None
+    ce_fill_price = ce_premium  # paper trades record the live premium (no real fill)
     if not is_paper:
+        ce_remote_id = generate_remote_order_id(ft.stock_name + "_CE")
         ce_result = fivepaisa.place_order(
             settings.access_token, "N", "D", ce_scrip_code, "S",
             _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False,
-            generate_remote_order_id(ft.stock_name + "_CE")
+            ce_remote_id
         )
         if not ce_result["success"]:
             _save_log(db, "ERROR", f"{ft.stock_name}: option CE sell failed - {ce_result['error']}")
             return
         ce_order_id = str(ce_result["broker_order_id"])
+
+        # Confirm the order actually EXECUTED before showing it as a live trade, and
+        # record the REAL average fill price + exchange trade id (not our intended /
+        # limit price). If it didn't fill (e.g. resting away), don't record a live
+        # trade — alert the client to handle it manually.
+        filled, unfilled, fills = _confirm_fills(settings, db, ft.stock_name, [(ce_remote_id, "CE")])
+        if "CE" not in filled:
+            _save_log(db, "ERROR",
+                f"{ft.stock_name}: CE sell not executed ({', '.join(unfilled)}) — NOT recording a "
+                "live trade; client to handle manually.")
+            try:
+                from notifications.email import send_partial_fill_alert
+                send_partial_fill_alert(ft.stock_name, [], unfilled)
+            except Exception as e:
+                _save_log(db, "ERROR", f"{ft.stock_name}: partial-fill alert email FAILED - {_exc_detail(e)}")
+            return
+        fill = fills.get("CE") or {}
+        ce_exch_id = fill.get("exch_order_id")
+        if fill.get("price") and fill["price"] > 0:
+            ce_fill_price = fill["price"]
 
     trade = Trade(
         stock_name=ft.stock_name,
@@ -804,7 +857,8 @@ def _place_option_trade(db, settings, ft: FixedTrade):
         lot_size=lot_size,
         ce_scrip_code=ce_scrip_code,
         ce_broker_order_id=ce_order_id,
-        ce_entry_price=ce_option.get("LastRate", ce_strike),
+        ce_exch_order_id=ce_exch_id,
+        ce_entry_price=ce_fill_price,
         expiry_date=chain_result.get("expiry"),
         profit_target=ft.profit_target,
         loss_limit=ft.loss_limit,
@@ -812,7 +866,9 @@ def _place_option_trade(db, settings, ft: FixedTrade):
     )
     db.add(trade)
     mode = "PAPER" if is_paper else "LIVE"
-    _save_log(db, "INFO", f"{ft.stock_name}: option CE sell ({mode}) at strike {ce_strike}, scrip {ce_scrip_code}")
+    _save_log(db, "INFO",
+        f"{ft.stock_name}: option CE sell ({mode}) at strike {ce_strike}, scrip {ce_scrip_code}, "
+        f"entry {ce_fill_price}, exch id {ce_exch_id}")
     db.commit()
 
 
@@ -1017,16 +1073,36 @@ def run_webhook_trade(stock_name: str, force: bool = False):
         # ── Option trade: naked CE sell only ────────────────────────────────
         if trade_type == "option":
             ce_order_id = None
+            ce_exch_id = None
+            ce_fill_price = ce_premium  # paper records the live premium (no real fill)
             if not is_paper:
+                ce_remote_id = generate_remote_order_id(stock_name + "_CE")
                 ce_result = fivepaisa.place_order(
                     settings.access_token, "N", "D", ce_scrip_code, "S",
                     _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False,
-                    generate_remote_order_id(stock_name + "_CE")
+                    ce_remote_id
                 )
                 if not ce_result["success"]:
                     _save_log(db, "ERROR", f"Screener {stock_name}: CE sell failed - {ce_result['error']}")
                     return
                 ce_order_id = str(ce_result["broker_order_id"])
+
+                # Confirm execution before recording, and use the REAL fill price + id.
+                filled, unfilled, fills = _confirm_fills(settings, db, stock_name, [(ce_remote_id, "CE")])
+                if "CE" not in filled:
+                    _save_log(db, "ERROR",
+                        f"Screener {stock_name}: CE sell not executed ({', '.join(unfilled)}) — NOT "
+                        "recording a live trade; client to handle manually.")
+                    try:
+                        from notifications.email import send_partial_fill_alert
+                        send_partial_fill_alert(stock_name, [], unfilled)
+                    except Exception as e:
+                        _save_log(db, "ERROR", f"Screener {stock_name}: partial-fill alert email FAILED - {_exc_detail(e)}")
+                    return
+                fill = fills.get("CE") or {}
+                ce_exch_id = fill.get("exch_order_id")
+                if fill.get("price") and fill["price"] > 0:
+                    ce_fill_price = fill["price"]
 
             trade = Trade(
                 stock_name=stock_name.upper(),
@@ -1036,7 +1112,8 @@ def run_webhook_trade(stock_name: str, force: bool = False):
                 lot_size=lot_size,
                 ce_scrip_code=ce_scrip_code,
                 ce_broker_order_id=ce_order_id,
-                ce_entry_price=ce_premium,
+                ce_exch_order_id=ce_exch_id,
+                ce_entry_price=ce_fill_price,
                 expiry_date=chain_result.get("expiry"),
                 profit_target=profit_target,
                 loss_limit=loss_limit,
@@ -1044,7 +1121,9 @@ def run_webhook_trade(stock_name: str, force: bool = False):
             )
             db.add(trade)
             mode = "PAPER" if is_paper else "LIVE"
-            _save_log(db, "INFO", f"Screener {stock_name}: naked CE sell ({mode}) — strike {ce_strike}, premium {ce_premium}, lot {lot_size}")
+            _save_log(db, "INFO",
+                f"Screener {stock_name}: naked CE sell ({mode}) — strike {ce_strike}, entry {ce_fill_price}, "
+                f"exch id {ce_exch_id}, lot {lot_size}")
             db.commit()
             return
 

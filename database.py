@@ -44,6 +44,9 @@ def _ensure_columns():
             "squareoff_attempts": "INTEGER DEFAULT 0",
             "last_squareoff_attempt_at": "DATETIME",
             "squareoff_alerted": "BOOLEAN DEFAULT 0",
+            "futures_exch_order_id": "VARCHAR",
+            "ce_exch_order_id": "VARCHAR",
+            "pe_exch_order_id": "VARCHAR",
         },
     }
     try:
