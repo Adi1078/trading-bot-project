@@ -1106,7 +1106,13 @@ def test_chartink_not_in_watchlist_logged_once_per_day():
 
 from bot import position_sync
 
+# get_ist_now() returns a tz-AWARE datetime in production, while placed_at loaded
+# from SQLite is tz-NAIVE. SYNC_NOW_AWARE mirrors get_ist_now(); placed_at is set
+# from the naive SYNC_NOW (and round-trips through SQLite naive anyway). This is the
+# exact aware-vs-naive mix that crashed position sync in production.
+from utils.helpers import IST
 SYNC_NOW = datetime(2026, 5, 20, 11, 0, 0)
+SYNC_NOW_AWARE = IST.localize(SYNC_NOW)
 
 
 def _aged_open_trade(minutes_old=60):
@@ -1117,7 +1123,7 @@ def _aged_open_trade(minutes_old=60):
 
 
 @patch("bot.position_sync.fivepaisa")
-@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW_AWARE)
 def test_sync_does_not_close_on_empty_snapshot(mock_now, mock_broker):
     """An EMPTY positions snapshot (feed lag / 'no record') must NEVER be read as
     'the client closed everything' — the trade stays open."""
@@ -1135,7 +1141,7 @@ def test_sync_does_not_close_on_empty_snapshot(mock_now, mock_broker):
 
 
 @patch("bot.position_sync.fivepaisa")
-@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW_AWARE)
 def test_sync_skips_trade_inside_grace_period(mock_now, mock_broker):
     """A just-placed trade (inside the grace window) is not reconciled even if its
     legs aren't in a live, non-empty snapshot yet (open-time feed lag)."""
@@ -1155,7 +1161,7 @@ def test_sync_skips_trade_inside_grace_period(mock_now, mock_broker):
 
 @patch("bot.trade_manager.fivepaisa")
 @patch("bot.position_sync.fivepaisa")
-@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW_AWARE)
 def test_sync_closes_when_legs_absent_from_live_feed_and_records_pnl(
         mock_now, mock_pos_broker, mock_tm_broker):
     """An aged trade whose legs are absent from a LIVE, non-empty snapshot is a real
@@ -1178,7 +1184,7 @@ def test_sync_closes_when_legs_absent_from_live_feed_and_records_pnl(
 
 
 @patch("bot.position_sync.fivepaisa")
-@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW)
+@patch("bot.position_sync.get_ist_now", return_value=SYNC_NOW_AWARE)
 def test_sync_keeps_trade_open_when_legs_present(mock_now, mock_broker):
     """If our legs still hold an open net qty, the trade stays open."""
     add(make_settings(), _aged_open_trade(minutes_old=60))

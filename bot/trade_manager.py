@@ -10,7 +10,7 @@ from models.log import Log
 from broker import fivepaisa
 from bot.strike_calculator import calculate_ce_strike, find_pe_strike, find_pe_candidates
 from utils.exchange_calendar import get_current_expiry, get_next_expiry
-from utils.helpers import generate_remote_order_id, calculate_trade_pnl, get_ist_now
+from utils.helpers import generate_remote_order_id, calculate_trade_pnl, get_ist_now, to_naive
 
 logger = logging.getLogger(__name__)
 
@@ -1394,7 +1394,9 @@ def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
             return
 
         if attempts >= 1 and trade.last_squareoff_attempt_at:
-            elapsed = (now - trade.last_squareoff_attempt_at).total_seconds()
+            # to_naive() because last_squareoff_attempt_at loaded from SQLite is
+            # tz-naive while get_ist_now() is tz-aware (can't subtract directly).
+            elapsed = (to_naive(now) - to_naive(trade.last_squareoff_attempt_at)).total_seconds()
             if elapsed < SQUAREOFF_RETRY_SECONDS:
                 _save_log(db, "INFO",
                     f"{tag} square-off cooldown: {int(elapsed)}s since last attempt "

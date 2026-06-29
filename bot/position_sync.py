@@ -5,7 +5,7 @@ from models.trade import Trade
 from models.settings import Settings
 from models.log import Log
 from broker import fivepaisa
-from utils.helpers import get_ist_now, calculate_trade_pnl
+from utils.helpers import get_ist_now, calculate_trade_pnl, to_naive
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,9 @@ def sync_positions():
         # Check each of our open trades
         for trade in our_open_trades:
             # Grace period: a just-placed trade may not show in the feed yet.
-            if trade.placed_at and (now - trade.placed_at) < timedelta(minutes=SYNC_GRACE_MINUTES):
+            # to_naive() because placed_at loaded from SQLite is tz-naive while
+            # get_ist_now() is tz-aware (can't subtract the two directly).
+            if trade.placed_at and (to_naive(now) - to_naive(trade.placed_at)) < timedelta(minutes=SYNC_GRACE_MINUTES):
                 continue
 
             if _is_closed_on_broker(trade, open_scrip_codes):

@@ -9,6 +9,19 @@ def get_ist_now():
     return datetime.now(IST)
 
 
+def to_naive(dt):
+    """
+    Strip tzinfo so a tz-aware datetime (get_ist_now()) can be safely
+    subtracted/compared with a tz-naive one. Datetimes loaded back from SQLite are
+    naive, so `get_ist_now() - trade.placed_at` otherwise raises "can't subtract
+    offset-naive and offset-aware datetimes". The server runs in IST, so the
+    wall-clock values already align — this only removes the offset mismatch.
+    """
+    if dt is not None and dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
 def get_ist_time_str():
     return datetime.now(IST).strftime("%H:%M")
 
