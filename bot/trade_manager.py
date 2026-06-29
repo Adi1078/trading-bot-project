@@ -43,9 +43,13 @@ SQUAREOFF_RETRY_SECONDS = 120     # 2 minutes between retry attempts
 SQUAREOFF_MAX_ATTEMPTS = 3        # "2-3 times" then leave it for manual close
 
 
-def _round_tick(price):
-    """Round to the nearest ₹0.05 tick (exchange requirement) and 2 decimals."""
-    return round(round(price / 0.05) * 0.05, 2)
+def _round_tick(price, tick=0.05):
+    """Round to the nearest exchange tick (default ₹0.05) and 2 decimals. The tick
+    is per-instrument — most options are 0.05 but many futures are 0.1/0.2/0.5/1/5,
+    and a price off the instrument's tick grid is rejected by the exchange."""
+    if not tick or tick <= 0:
+        tick = 0.05
+    return round(round(price / tick) * tick, 2)
 
 
 def _parse_close_time(value):
@@ -57,11 +61,17 @@ def _parse_close_time(value):
         return 12, 0
 
 
-def _marketable_limit_price(ltp, side):
+def _marketable_limit_price(ltp, side, scrip_code=None):
     """
     Limit price that behaves like a market order but caps slippage.
-    Buy ("B"): a buffer above LTP; Sell ("S"): a buffer below. Rounded to tick.
+    Buy ("B"): a buffer above LTP; Sell ("S"): a buffer below. Rounded to the
+    instrument's own exchange tick (looked up by scrip_code) so the price is never
+    off the tick grid — futures often use 0.1/0.2/... not 0.05.
     Falls back to 0 (market) only if LTP is unavailable.
+
+    Defensive: if the tick can't be resolved (no scrip_code, scrip master
+    unavailable, or a non-numeric value) it falls back to 0.05 — i.e. the previous
+    behaviour — so this can never raise.
     """
     try:
         ltp = float(ltp)
@@ -69,9 +79,17 @@ def _marketable_limit_price(ltp, side):
         return 0
     if ltp <= 0:
         return 0
+    tick = 0.05
+    if scrip_code:
+        try:
+            t = float(fivepaisa.get_tick_size(scrip_code))
+            if t > 0:
+                tick = t
+        except (TypeError, ValueError):
+            tick = 0.05
     buffer = LIMIT_ORDER_BUFFER_CHEAP if ltp <= CHEAP_PRICE_THRESHOLD else LIMIT_ORDER_BUFFER
     factor = (1 + buffer) if side == "B" else (1 - buffer)
-    return _round_tick(ltp * factor)
+    return _round_tick(ltp * factor, tick)
 
 
 def _leg_ltp(db, settings, scrip_code, leg=""):
@@ -624,15 +642,15 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
 
     futures_result = fivepaisa.place_order(
         settings.access_token, "N", "D", futures_scrip_code, "B",
-        _marketable_limit_price(futures_price, "B"), lot_size, False, fut_remote_id
+        _marketable_limit_price(futures_price, "B", futures_scrip_code), lot_size, False, fut_remote_id
     )
     ce_result = fivepaisa.place_order(
         settings.access_token, "N", "D", ce_scrip_code, "S",
-        _marketable_limit_price(ce_premium, "S"), lot_size, False, ce_remote_id
+        _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False, ce_remote_id
     )
     pe_result = fivepaisa.place_order(
         settings.access_token, "N", "D", pe_scrip_code, "B",
-        _marketable_limit_price(pe_premium, "B"), lot_size, False, pe_remote_id
+        _marketable_limit_price(pe_premium, "B", pe_scrip_code), lot_size, False, pe_remote_id
     )
 
     # Check which were accepted by the broker (RMS-level check)
@@ -713,7 +731,7 @@ def _place_option_trade(db, settings, ft: FixedTrade):
     if not is_paper:
         ce_result = fivepaisa.place_order(
             settings.access_token, "N", "D", ce_scrip_code, "S",
-            _marketable_limit_price(ce_premium, "S"), lot_size, False,
+            _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False,
             generate_remote_order_id(ft.stock_name + "_CE")
         )
         if not ce_result["success"]:
@@ -946,7 +964,7 @@ def run_webhook_trade(stock_name: str, force: bool = False):
             if not is_paper:
                 ce_result = fivepaisa.place_order(
                     settings.access_token, "N", "D", ce_scrip_code, "S",
-                    _marketable_limit_price(ce_premium, "S"), lot_size, False,
+                    _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False,
                     generate_remote_order_id(stock_name + "_CE")
                 )
                 if not ce_result["success"]:
@@ -1001,15 +1019,15 @@ def run_webhook_trade(stock_name: str, force: bool = False):
 
             futures_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", futures_scrip_code, "B",
-                _marketable_limit_price(futures_price, "B"), lot_size, False, fut_remote_id
+                _marketable_limit_price(futures_price, "B", futures_scrip_code), lot_size, False, fut_remote_id
             )
             ce_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", ce_scrip_code, "S",
-                _marketable_limit_price(ce_premium, "S"), lot_size, False, ce_remote_id
+                _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False, ce_remote_id
             )
             pe_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", pe_scrip_code, "B",
-                _marketable_limit_price(pe_premium, "B"), lot_size, False, pe_remote_id
+                _marketable_limit_price(pe_premium, "B", pe_scrip_code), lot_size, False, pe_remote_id
             )
 
             # Save & track whatever actually opened — partial fills are kept (only the
@@ -1350,7 +1368,7 @@ def _square_off_legs(db, settings, trade: Trade) -> bool:
             _save_log(db, "INFO", f"{leg_tag} already flat at broker - skipping (idempotent)")
             continue
         ltp = _leg_ltp(db, settings, scrip_code, leg)
-        price = _marketable_limit_price(ltp, side)
+        price = _marketable_limit_price(ltp, side, scrip_code)
         if price == 0:
             _save_log(db, "ERROR",
                 f"{leg_tag} could not derive a valid exit price (ltp={ltp}); a 0 limit would not "

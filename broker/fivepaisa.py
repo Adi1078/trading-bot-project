@@ -511,6 +511,39 @@ def get_lot_size(stock_name, expiry_date):
     return None
 
 
+_tick_size_cache = {}
+_tick_size_loaded = False
+
+
+def get_tick_size(scrip_code, default=0.05):
+    """
+    Return the exchange TICK SIZE for a scrip from the F&O scrip master, keyed by
+    ScripCode. This MATTERS: a limit price must be a multiple of the instrument's
+    own tick or the exchange rejects it ("order price is not multiple of the tick
+    size"). Ticks vary — most options are 0.05, but many FUTURES are 0.1 / 0.2 /
+    0.5 / 1 / 5 (e.g. NIFTY & RELIANCE futures are 0.1). Hardcoding 0.05 silently
+    breaks those. Falls back to `default` if the scrip/field isn't found.
+    """
+    global _tick_size_loaded
+    if not scrip_code:
+        return default
+    if not _tick_size_loaded:
+        rows = _load_raw_scrip_master()
+        if rows:
+            for row in rows:
+                sc = str(row.get("ScripCode") or "")
+                ts = row.get("TickSize")
+                if sc and ts not in (None, ""):
+                    try:
+                        t = float(ts)
+                        if t > 0:
+                            _tick_size_cache[sc] = t
+                    except (ValueError, TypeError):
+                        pass
+            _tick_size_loaded = True
+    return _tick_size_cache.get(str(scrip_code), default)
+
+
 def get_monthly_expiries():
     """
     Return the real monthly F&O expiry dates straight from the NSE scrip master,

@@ -1249,3 +1249,25 @@ def test_confirm_fills_logs_broker_rejection_reason(mock_rid, mock_broker):
     assert trade is not None
     assert trade.futures_scrip_code is None
     assert trade.ce_scrip_code is not None and trade.pe_scrip_code is not None
+
+
+# ── Per-instrument tick size (fix for futures "not multiple of tick size") ───────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_marketable_limit_price_uses_instrument_tick(mock_broker):
+    """Futures with a 0.1 tick must get a price on the 0.1 grid — a 0.05-rounded
+    price (…x5) is rejected by the exchange (the NIFTY/RELIANCE futures bug)."""
+    from bot.trade_manager import _marketable_limit_price
+    mock_broker.get_tick_size.return_value = 0.1
+    for ltp, side in [(24091.0, "B"), (24091.0, "S"), (24191.85, "B"), (567.9, "S")]:
+        p = _marketable_limit_price(ltp, side, "62329")
+        assert abs(p / 0.1 - round(p / 0.1)) < 1e-9, f"{p} (ltp={ltp},{side}) not on 0.1 grid"
+
+
+def test_marketable_limit_price_defaults_to_005_without_scrip():
+    """No scrip_code → 0.05 tick (previous behaviour); never raises."""
+    from bot.trade_manager import _marketable_limit_price
+    p = _marketable_limit_price(250.0, "B")          # > ₹100 → 0.5% buffer
+    assert abs(p / 0.05 - round(p / 0.05)) < 1e-9
+    assert _marketable_limit_price(0, "B", "62329") == 0      # bad ltp → 0, no crash
+    assert _marketable_limit_price("x", "B", "62329") == 0    # non-numeric → 0, no crash
