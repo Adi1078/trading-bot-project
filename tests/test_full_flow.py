@@ -1271,3 +1271,67 @@ def test_marketable_limit_price_defaults_to_005_without_scrip():
     assert abs(p / 0.05 - round(p / 0.05)) < 1e-9
     assert _marketable_limit_price(0, "B", "62329") == 0      # bad ltp → 0, no crash
     assert _marketable_limit_price("x", "B", "62329") == 0    # non-numeric → 0, no crash
+
+
+# ── Live order-book pricing (stop orders resting "away" on a stale LTP) ──────────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_order_price_sell_uses_best_bid_not_stale_ltp(mock_broker):
+    """The MCX case: stale LTP ~1.95 but live bid 1.50. A SELL must anchor to the
+    best BID (1.50) so it crosses and fills, not rest away at 1.95."""
+    from bot.trade_manager import _order_price
+    add(make_settings())
+    mock_broker.get_tick_size.return_value = 0.05
+    mock_broker.get_market_depth.return_value = {"success": True, "depth": [
+        {"BbBuySellFlag": 66, "Price": 1.45, "Quantity": 100},
+        {"BbBuySellFlag": 66, "Price": 1.50, "Quantity": 200},   # best bid
+        {"BbBuySellFlag": 83, "Price": 1.95, "Quantity": 50},    # stale offer
+    ]}
+    db = TestSession(); s = db.query(Settings).first()
+    price = _order_price(db, s, "146623", "S", 1.95, "CE")   # stale ltp 1.95
+    db.close()
+    assert price <= 1.55, f"sell should price near the 1.50 bid, got {price} (stale 1.95?)"
+    assert price > 0
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_order_price_buy_uses_best_ask(mock_broker):
+    """A BUY anchors to the best ASK so it crosses up and fills."""
+    from bot.trade_manager import _order_price
+    add(make_settings())
+    mock_broker.get_tick_size.return_value = 0.05
+    mock_broker.get_market_depth.return_value = {"success": True, "depth": [
+        {"BbBuySellFlag": 83, "Price": 2.00, "Quantity": 100},   # best ask
+        {"BbBuySellFlag": 83, "Price": 2.10, "Quantity": 200},
+        {"BbBuySellFlag": 66, "Price": 1.50, "Quantity": 50},
+    ]}
+    db = TestSession(); s = db.query(Settings).first()
+    price = _order_price(db, s, "X", "B", 1.50, "PE")   # stale ltp 1.50
+    db.close()
+    assert price >= 2.00, f"buy should price at/above best ask 2.00, got {price}"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_order_price_falls_back_to_ltp_when_no_depth(mock_broker):
+    """No live book → fall back to the LTP-based marketable price (previous behaviour)."""
+    from bot.trade_manager import _order_price
+    add(make_settings())
+    mock_broker.get_tick_size.return_value = 0.05
+    mock_broker.get_market_depth.return_value = {"success": False, "error": "no depth"}
+    db = TestSession(); s = db.query(Settings).first()
+    price = _order_price(db, s, "X", "S", 10.0, "CE")
+    db.close()
+    assert abs(price - 9.9) < 0.001, f"expected LTP fallback ~9.9, got {price}"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_order_price_never_raises_on_depth_crash(mock_broker):
+    """A depth-fetch crash must NOT block the order — it falls back to LTP."""
+    from bot.trade_manager import _order_price
+    add(make_settings())
+    mock_broker.get_tick_size.return_value = 0.05
+    mock_broker.get_market_depth.side_effect = Exception("boom")
+    db = TestSession(); s = db.query(Settings).first()
+    price = _order_price(db, s, "X", "B", 20.0, "FUT")
+    db.close()
+    assert abs(price - 20.2) < 0.001, f"expected LTP fallback ~20.2, got {price}"

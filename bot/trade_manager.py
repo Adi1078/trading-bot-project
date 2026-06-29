@@ -92,6 +92,62 @@ def _marketable_limit_price(ltp, side, scrip_code=None):
     return _round_tick(ltp * factor, tick)
 
 
+def _depth_touch(db, settings, scrip_code, side, leg=""):
+    """
+    Best opposite-side price from the LIVE level-5 order book (V2/MarketDepth):
+      SELL ("S") -> best BID  (highest bid price;  BbBuySellFlag 66)
+      BUY  ("B") -> best ASK  (lowest offer price; BbBuySellFlag 83)
+    This is the live price our order must reach to fill immediately, instead of a
+    stale Last-Traded-Price that can sit "away" from the market. Returns a price
+    > 0, or None if depth is unavailable/empty (caller falls back to LTP).
+    Never raises — any failure returns None so order placement is never blocked.
+    """
+    if not scrip_code:
+        return None
+    tag = f"[DEPTH {leg} {scrip_code} {side}]"
+    try:
+        res = fivepaisa.get_market_depth(
+            settings.access_token, settings.client_code, "N", "D", scrip_code)
+        if not res.get("success"):
+            _save_log(db, "INFO", f"{tag} depth unavailable, using LTP - {str(res.get('error',''))[:80]}")
+            return None
+        want = 66 if side == "S" else 83   # SELL hits bids (66); BUY hits offers (83)
+        prices = []
+        for d in (res.get("depth") or []):
+            try:
+                flag = int(float(d.get("BbBuySellFlag", 0)))
+                qty = float(d.get("Quantity") or 0)
+                price = float(d.get("Price") or 0)
+            except (ValueError, TypeError):
+                continue
+            if flag == want and qty > 0 and price > 0:
+                prices.append(price)
+        if not prices:
+            _save_log(db, "INFO",
+                f"{tag} no live {'bids' if side == 'S' else 'offers'} in book, using LTP")
+            return None
+        touch = max(prices) if side == "S" else min(prices)  # best bid / best ask
+        _save_log(db, "INFO", f"{tag} live touch = {touch}")
+        return touch
+    except Exception as e:
+        _save_log(db, "WARNING", f"{tag} depth pricing crashed, using LTP - {_exc_detail(e)}")
+        return None
+
+
+def _order_price(db, settings, scrip_code, side, ltp, leg=""):
+    """
+    Marketable limit price anchored to the LIVE order book so the order crosses the
+    spread and fills, instead of resting "away" on a stale LTP. Uses the best
+    bid/ask (MarketDepth) as the anchor when available, else the passed LTP, then
+    applies the standard marketable buffer + the instrument's tick. Never raises —
+    falls back to the LTP-based price on any problem (no regression vs before).
+    """
+    anchor = _depth_touch(db, settings, scrip_code, side, leg)
+    if not anchor or anchor <= 0:
+        anchor = ltp
+    return _marketable_limit_price(anchor, side, scrip_code)
+
+
 def _leg_ltp(db, settings, scrip_code, leg=""):
     """
     Fetch the current LTP for a single F&O leg, or None. Every failure mode is
@@ -642,15 +698,15 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
 
     futures_result = fivepaisa.place_order(
         settings.access_token, "N", "D", futures_scrip_code, "B",
-        _marketable_limit_price(futures_price, "B", futures_scrip_code), lot_size, False, fut_remote_id
+        _order_price(db, settings, futures_scrip_code, "B", futures_price, "FUT"), lot_size, False, fut_remote_id
     )
     ce_result = fivepaisa.place_order(
         settings.access_token, "N", "D", ce_scrip_code, "S",
-        _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False, ce_remote_id
+        _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False, ce_remote_id
     )
     pe_result = fivepaisa.place_order(
         settings.access_token, "N", "D", pe_scrip_code, "B",
-        _marketable_limit_price(pe_premium, "B", pe_scrip_code), lot_size, False, pe_remote_id
+        _order_price(db, settings, pe_scrip_code, "B", pe_premium, "PE"), lot_size, False, pe_remote_id
     )
 
     # Check which were accepted by the broker (RMS-level check)
@@ -731,7 +787,7 @@ def _place_option_trade(db, settings, ft: FixedTrade):
     if not is_paper:
         ce_result = fivepaisa.place_order(
             settings.access_token, "N", "D", ce_scrip_code, "S",
-            _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False,
+            _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False,
             generate_remote_order_id(ft.stock_name + "_CE")
         )
         if not ce_result["success"]:
@@ -964,7 +1020,7 @@ def run_webhook_trade(stock_name: str, force: bool = False):
             if not is_paper:
                 ce_result = fivepaisa.place_order(
                     settings.access_token, "N", "D", ce_scrip_code, "S",
-                    _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False,
+                    _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False,
                     generate_remote_order_id(stock_name + "_CE")
                 )
                 if not ce_result["success"]:
@@ -1019,15 +1075,15 @@ def run_webhook_trade(stock_name: str, force: bool = False):
 
             futures_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", futures_scrip_code, "B",
-                _marketable_limit_price(futures_price, "B", futures_scrip_code), lot_size, False, fut_remote_id
+                _order_price(db, settings, futures_scrip_code, "B", futures_price, "FUT"), lot_size, False, fut_remote_id
             )
             ce_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", ce_scrip_code, "S",
-                _marketable_limit_price(ce_premium, "S", ce_scrip_code), lot_size, False, ce_remote_id
+                _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False, ce_remote_id
             )
             pe_result = fivepaisa.place_order(
                 settings.access_token, "N", "D", pe_scrip_code, "B",
-                _marketable_limit_price(pe_premium, "B", pe_scrip_code), lot_size, False, pe_remote_id
+                _order_price(db, settings, pe_scrip_code, "B", pe_premium, "PE"), lot_size, False, pe_remote_id
             )
 
             # Save & track whatever actually opened — partial fills are kept (only the
@@ -1368,7 +1424,7 @@ def _square_off_legs(db, settings, trade: Trade) -> bool:
             _save_log(db, "INFO", f"{leg_tag} already flat at broker - skipping (idempotent)")
             continue
         ltp = _leg_ltp(db, settings, scrip_code, leg)
-        price = _marketable_limit_price(ltp, side, scrip_code)
+        price = _order_price(db, settings, scrip_code, side, ltp, leg)
         if price == 0:
             _save_log(db, "ERROR",
                 f"{leg_tag} could not derive a valid exit price (ltp={ltp}); a 0 limit would not "
