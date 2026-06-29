@@ -206,35 +206,62 @@ def _confirm_fills(settings, db, stock_name, legs):
     """
     time.sleep(1)  # give the exchange 1 second to process
     filled, unfilled = [], []
+
+    # OrderStatus tells us the Status ("Rejected by Exch", "Pending", ...) but NOT
+    # the reason. The OrderBook carries the broker/exchange REASON keyed by
+    # RemoteOrderID, so when a leg isn't filled we look the reason up there and log
+    # exactly WHY (e.g. tick size, margin, price band). Fetched once, lazily, only
+    # if a leg actually fails — so a clean all-filled placement makes no extra call.
+    _book = {"map": None}
+
+    def _reason_for(remote_id):
+        if _book["map"] is None:
+            ob = fivepaisa.get_order_book(settings.access_token, settings.client_code)
+            if ob.get("success"):
+                _book["map"] = {
+                    str(o.get("RemoteOrderID", "")): o.get("Reason")
+                    for o in ob.get("orders", [])
+                }
+            else:
+                _book["map"] = {}
+                _save_log(db, "WARNING",
+                    f"{stock_name}: could not fetch order book for rejection reason — {ob.get('error')}")
+        reason = _book["map"].get(str(remote_id))
+        return (reason or "").strip() or None
+
     for remote_order_id, leg_name in legs:
         try:
             result = fivepaisa.get_order_status(
                 settings.access_token, settings.client_code, "N", remote_order_id
             )
             if not result["success"]:
-                _save_log(db, "ERROR",
-                    f"{stock_name}: [{leg_name}] order-status check failed — {result['error']}")
-                unfilled.append(f"{leg_name} (status-check failed: {result['error'][:80]})")
+                reason = _reason_for(remote_order_id)
+                detail = reason or f"status-check failed: {result['error'][:80]}"
+                _save_log(db, "ERROR", f"{stock_name}: [{leg_name}] NOT FILLED — {detail}")
+                unfilled.append(f"{leg_name}: {detail}")
                 continue
 
             orders = result.get("orders", [])
             if not orders:
-                _save_log(db, "INFO",
-                    f"{stock_name}: [{leg_name}] order status = no records (RemoteOrderID not found yet)")
-                unfilled.append(f"{leg_name} (no status record)")
+                reason = _reason_for(remote_order_id)
+                detail = reason or "no status record yet (RemoteOrderID not found)"
+                _save_log(db, "INFO", f"{stock_name}: [{leg_name}] not filled — {detail}")
+                unfilled.append(f"{leg_name}: {detail}")
                 continue
             # 5paisa may return multiple history entries per order (e.g. Modified → Fully Executed).
             # Check all entries — if any shows "Fully Executed" the order is filled.
             if any(o.get("Status") == "Fully Executed" for o in orders):
-                final_status = "Fully Executed"
-            else:
-                final_status = orders[-1].get("Status", "Unknown")  # most recent entry last
-            _save_log(db, "INFO",
-                f"{stock_name}: [{leg_name}] order status = {final_status} ({len(orders)} record(s))")
-            if final_status == "Fully Executed":
+                _save_log(db, "INFO",
+                    f"{stock_name}: [{leg_name}] order status = Fully Executed ({len(orders)} record(s))")
                 filled.append(leg_name)
             else:
-                unfilled.append(f"{leg_name} (status: {final_status})")
+                final_status = orders[-1].get("Status", "Unknown")  # most recent entry last
+                reason = _reason_for(remote_order_id)
+                _save_log(db, "ERROR",
+                    f"{stock_name}: [{leg_name}] NOT FILLED — status={final_status}, "
+                    f"broker reason: {reason or 'none given by broker'} ({len(orders)} record(s))")
+                detail = f"{final_status}" + (f" — {reason}" if reason else "")
+                unfilled.append(f"{leg_name}: {detail}")
         except Exception as e:
             _save_log(db, "ERROR",
                 f"{stock_name}: [{leg_name}] order-status check crashed — {_exc_detail(e)}")

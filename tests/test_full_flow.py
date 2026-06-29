@@ -1198,3 +1198,54 @@ def test_sync_keeps_trade_open_when_legs_present(mock_now, mock_broker):
     trade = db.query(Trade).first()
     db.close()
     assert trade.status == "open"
+
+
+# ── Rejection-reason logging (turn "Rejected by Exch" into a real reason) ────────
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.generate_remote_order_id", side_effect=lambda name: name + "_RID")
+def test_confirm_fills_logs_broker_rejection_reason(mock_rid, mock_broker):
+    """A leg accepted by RMS but then Rejected by the exchange → the bot pulls the
+    broker's REASON from the order book and surfaces it in the log AND the partial-
+    fill alert, instead of just 'Rejected by Exch'. (The NIFTY tick-size case.)"""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    # All 3 accepted by RMS...
+    mock_broker.place_order.side_effect = [order_ok(111), order_ok(222), order_ok(333)]
+    # ...but FUT is Rejected by Exch; CE & PE fully executed.
+    mock_broker.get_order_status.side_effect = [
+        {"success": True, "orders": [{"Status": "Rejected by Exch"}]},  # FUT
+        fill_ok(),  # CE
+        fill_ok(),  # PE
+    ]
+    # The order book carries the reason, keyed by the FUT RemoteOrderID.
+    mock_broker.get_order_book.return_value = {
+        "success": True,
+        "orders": [{"RemoteOrderID": "INFY_FUT_RID",
+                    "Reason": "The order price Is Not multiple of the tick size."}],
+    }
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_partial_fill_alert") as mock_alert:
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    # Reason surfaced in the partial-fill alert...
+    mock_alert.assert_called_once()
+    alert_text = " ".join(str(a) for a in mock_alert.call_args[0])
+    assert "tick size" in alert_text.lower(), f"reason missing from alert: {alert_text}"
+
+    # ...and written to the logs.
+    db = TestSession()
+    logs = " ".join(l.message for l in db.query(Log).all())
+    trade = db.query(Trade).first()
+    db.close()
+    assert "tick size" in logs.lower(), "broker reason should be in the logs"
+    # FUT (rejected) is left empty; CE+PE are tracked.
+    assert trade is not None
+    assert trade.futures_scrip_code is None
+    assert trade.ce_scrip_code is not None and trade.pe_scrip_code is not None

@@ -328,6 +328,31 @@ def get_order_status(access_token, client_code, exchange, remote_order_id):
         return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
+def get_order_book(access_token, client_code):
+    """
+    Fetch today's full order book (V2/OrderBook). Unlike OrderStatus, each record
+    here carries the broker/exchange REJECTION REASON in a "Reason" field (keyed by
+    RemoteOrderID), e.g. "The order price Is Not multiple of the tick size." We use
+    this to log exactly WHY a leg didn't fill instead of just "Rejected by Exch".
+    Returns {"success": True, "orders": [...]} or {"success": False, "error": ...}.
+    """
+    app_key, _, _, _, _ = _creds()
+    url = f"{BASE_URL}/V2/OrderBook"
+    payload = {"head": {"key": app_key}, "body": {"ClientCode": client_code}}
+    try:
+        response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if not _head_ok(data):
+            logger.error(f"get_order_book failed: {_head_error(data)}")
+            return {"success": False, "error": _head_error(data)}
+        body = data.get("body") or {}
+        return {"success": True, "orders": body.get("OrderBookDetail") or []}
+    except Exception as e:
+        logger.error(f"get_order_book exception: {e}", exc_info=True)
+        return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
+
+
 def get_market_quote(access_token, scrip_list):
     """
     Get live price quotes for a list of scrips.
