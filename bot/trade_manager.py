@@ -1359,6 +1359,46 @@ def _fetch_current_prices(db, settings, trade: Trade):
     )
 
 
+def _actual_exit_fills(db, settings, trade: Trade):
+    """
+    Read each leg's ACTUAL exit fill price from the broker's net-position average
+    rates, so a closed trade's P&L reflects the real fills (not the LTP at the close
+    moment). The strategy fixes each leg's closing side, so the exit price is the
+    average rate on the side we close with:
+        Futures (long)  -> closed by SELL -> SellAvgRate
+        CE      (short) -> closed by BUY  -> BuyAvgRate
+        PE      (long)  -> closed by SELL -> SellAvgRate
+    Returns {scrip_code: exit_price} for legs the broker reports a fill for.
+    Best-effort and read-only: any failure returns {} and the caller falls back to
+    the LTP. Does NOT touch the square-off logic.
+    """
+    out = {}
+    close_side = {
+        str(trade.futures_scrip_code): "SellAvgRate",
+        str(trade.ce_scrip_code): "BuyAvgRate",
+        str(trade.pe_scrip_code): "SellAvgRate",
+    }
+    try:
+        res = fivepaisa.get_positions(settings.access_token, settings.client_code)
+        if not res.get("success"):
+            return out
+        for p in (res.get("positions") or []):
+            sc = str(p.get("ScripCode"))
+            field = close_side.get(sc)
+            if not field:
+                continue
+            try:
+                v = float(p.get(field) or 0)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                out[sc] = v
+    except Exception as e:
+        _save_log(db, "WARNING",
+            f"[EXITFILL {trade.stock_name} #{trade.id}] could not read actual exit fills - {_exc_detail(e)}")
+    return out
+
+
 def _check_and_close_if_needed(db, settings, trade: Trade):
     """Evaluate a single trade and close it if any exit condition is met."""
 
@@ -1611,14 +1651,25 @@ def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
     else:
         _save_log(db, "INFO", f"{tag} exit triggered. reason={reason}, paper=True")
 
-    if current_prices:
-        trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = current_prices
-        trade.pnl = calculate_trade_pnl(
-            trade.futures_entry_price, trade.futures_exit_price,
-            trade.ce_entry_price, trade.ce_exit_price,
-            trade.pe_entry_price, trade.pe_exit_price,
-            lot_size=trade.lot_size or 1
-        )
+    # Exit prices for P&L: PREFER each leg's ACTUAL broker fill (read from the
+    # net-position average rates); fall back to the LTP (current_prices) only where
+    # the broker didn't report a fill, and for paper trades (no real fill). This
+    # makes the recorded P&L match the broker's real fills, not the last-traded price
+    # at the close moment. This is read-only and does NOT change the square-off.
+    fills = {} if trade.is_paper_trade else _actual_exit_fills(db, settings, trade)
+    lt_fut, lt_ce, lt_pe = current_prices if current_prices else (None, None, None)
+    if trade.futures_scrip_code:
+        trade.futures_exit_price = fills.get(str(trade.futures_scrip_code)) or lt_fut
+    if trade.ce_scrip_code:
+        trade.ce_exit_price = fills.get(str(trade.ce_scrip_code)) or lt_ce
+    if trade.pe_scrip_code:
+        trade.pe_exit_price = fills.get(str(trade.pe_scrip_code)) or lt_pe
+    trade.pnl = calculate_trade_pnl(
+        trade.futures_entry_price, trade.futures_exit_price,
+        trade.ce_entry_price, trade.ce_exit_price,
+        trade.pe_entry_price, trade.pe_exit_price,
+        lot_size=trade.lot_size or 1
+    )
 
     trade.status = "closed"
     trade.close_reason = reason

@@ -1419,3 +1419,41 @@ def test_naked_ce_not_recorded_if_not_executed(mock_broker):
     db = TestSession(); trade = db.query(Trade).first(); db.close()
     assert trade is None, "an unexecuted CE must NOT be recorded as a live trade"
     mock_alert.assert_called_once()
+
+
+# ── Exit P&L tracks the ACTUAL fill, not the LTP ────────────────────────────────
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_close_records_actual_exit_fill_not_ltp(mock_now, mock_broker):
+    """On close, the exit price is read from the broker's closing-side average rate
+    (the real fill), not the LTP at the close moment — so P&L matches the broker."""
+    add(make_settings(), make_open_trade(profit_target=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # LTP (profit)
+    mock_broker.place_order.return_value = order_ok(999)
+    # Actual broker fills differ from the LTP. Long legs (FUT/PE) close by SELL ->
+    # SellAvgRate; short CE closes by BUY -> BuyAvgRate.
+    exit_positions = {"success": True, "positions": [
+        {"ScripCode": "INFY_FUT",     "NetQty": 0, "SellAvgRate": 1158.0, "BuyAvgRate": 1126.3},
+        {"ScripCode": "INFY_CE_1150", "NetQty": 0, "BuyAvgRate": 5.2,    "SellAvgRate": 13.85},
+        {"ScripCode": "INFY_PE_1100", "NetQty": 0, "SellAvgRate": 7.9,   "BuyAvgRate": 11.1},
+    ]}
+    mock_broker.get_positions.side_effect = [
+        positions_resp("INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"),  # pre-check (open)
+        positions_resp(),                                            # post-check (flat)
+        exit_positions,                                              # actual-exit-fill read
+    ]
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_trade_closed_email"):
+                trade_manager.monitor_open_trades()
+
+    db = TestSession(); trade = db.query(Trade).first(); db.close()
+    assert trade.status == "closed"
+    # Exit prices = the ACTUAL fills, NOT the LTP (1160 / 5.0 / 8.0)
+    assert trade.futures_exit_price == 1158.0
+    assert trade.ce_exit_price == 5.2
+    assert trade.pe_exit_price == 7.9
+    # P&L from the real fills: (1158-1126.3)+(13.85-5.2)+(7.9-11.1) = 37.15
+    assert abs(trade.pnl - 37.15) < 0.01

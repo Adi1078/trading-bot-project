@@ -111,20 +111,26 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
         return {"success": False, "error": "Broker not connected"}
 
     # Square off filled legs with opposite-side market orders (same as auto-close path)
-    from bot.trade_manager import _fetch_current_prices, _square_off_legs
+    from bot.trade_manager import _fetch_current_prices, _square_off_legs, _actual_exit_fills
     if not trade.is_paper_trade:
         _square_off_legs(db, settings, trade)
 
-    # Compute P&L from current market prices before closing
-    current_prices = _fetch_current_prices(db, settings, trade)
-    if current_prices:
-        trade.futures_exit_price, trade.ce_exit_price, trade.pe_exit_price = current_prices
-        trade.pnl = calculate_trade_pnl(
-            trade.futures_entry_price, trade.futures_exit_price,
-            trade.ce_entry_price, trade.ce_exit_price,
-            trade.pe_entry_price, trade.pe_exit_price,
-            lot_size=trade.lot_size or 1
-        )
+    # P&L: prefer each leg's ACTUAL broker fill (net-position average rates); fall
+    # back to the LTP only where the broker didn't report a fill (and for paper).
+    fills = {} if trade.is_paper_trade else _actual_exit_fills(db, settings, trade)
+    lt_fut, lt_ce, lt_pe = _fetch_current_prices(db, settings, trade) or (None, None, None)
+    if trade.futures_scrip_code:
+        trade.futures_exit_price = fills.get(str(trade.futures_scrip_code)) or lt_fut
+    if trade.ce_scrip_code:
+        trade.ce_exit_price = fills.get(str(trade.ce_scrip_code)) or lt_ce
+    if trade.pe_scrip_code:
+        trade.pe_exit_price = fills.get(str(trade.pe_scrip_code)) or lt_pe
+    trade.pnl = calculate_trade_pnl(
+        trade.futures_entry_price, trade.futures_exit_price,
+        trade.ce_entry_price, trade.ce_exit_price,
+        trade.pe_entry_price, trade.pe_exit_price,
+        lot_size=trade.lot_size or 1
+    )
 
     trade.status = "closed"
     trade.close_reason = "manual"
