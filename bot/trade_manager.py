@@ -267,30 +267,37 @@ def _fetch_spot_price(settings, scrip_code):
     return None
 
 
+# An order accepted as "Pending" can take a few seconds to actually match at the
+# exchange. So we don't judge a fill on a single 1-second check (which once left a
+# genuinely-filled BEL CE untracked): we re-check up to FILL_CONFIRM_ATTEMPTS times,
+# FILL_CONFIRM_POLL_SECONDS apart (~10s total), and treat a leg as filled the moment
+# it shows "Fully Executed". A leg the broker terminally Rejected/Cancelled is
+# settled at once (it can never fill), so we don't waste the window on it.
+FILL_CONFIRM_ATTEMPTS = 5
+FILL_CONFIRM_POLL_SECONDS = 2
+
+
 def _confirm_fills(settings, db, stock_name, legs):
     """
-    Check fill status for each leg immediately after placement (1-second delay
-    gives the exchange time to process marketable-limit orders).
+    Confirm which placed legs actually EXECUTED, polling for up to ~10 seconds so a
+    slightly-slow fill isn't wrongly judged "not filled" on a single check.
 
     legs: list of (remote_order_id, leg_name)
     Returns (filled_legs, unfilled_legs, fills):
       filled_legs/unfilled_legs are leg_name strings; fills is
       {leg_name: {"price": <actual avg fill price or None>,
                   "exch_order_id": <exchange order id or None>}} for filled legs,
-      read from the broker (OrderStatus AveragePrice + ExchOrderID) so the trade is
-      recorded at its REAL executed price/ID, not our intended/limit price.
+      read from OrderStatus (AveragePrice + ExchOrderID) so the trade is recorded at
+      its REAL executed price/ID, not our intended/limit price.
 
-    Status "Fully Executed" → filled. Anything else (Pending, Rejected by Exch,
-    Cancelled, etc.) → unfilled → client must handle manually.
+    A leg is FILLED the moment OrderStatus shows "Fully Executed"; a Rejected/
+    Cancelled leg is settled immediately; only a leg still Pending after the whole
+    window is treated as not filled.
     """
-    time.sleep(1)  # give the exchange 1 second to process
     filled, unfilled, fills = [], [], {}
 
-    # OrderStatus tells us the Status ("Rejected by Exch", "Pending", ...) but NOT
-    # the reason. The OrderBook carries the broker/exchange REASON keyed by
-    # RemoteOrderID, so when a leg isn't filled we look the reason up there and log
-    # exactly WHY (e.g. tick size, margin, price band). Fetched once, lazily, only
-    # if a leg actually fails — so a clean all-filled placement makes no extra call.
+    # OrderBook carries the broker/exchange REASON (keyed by RemoteOrderID); fetched
+    # lazily only when a leg fails, so a clean all-filled placement makes no extra call.
     _book = {"map": None}
 
     def _reason_for(remote_id):
@@ -308,27 +315,18 @@ def _confirm_fills(settings, db, stock_name, legs):
         reason = _book["map"].get(str(remote_id))
         return (reason or "").strip() or None
 
-    for remote_order_id, leg_name in legs:
+    # One status read for a leg. Returns:
+    #   ("filled", avg_price, exch_id) | ("failed", status, None) | ("pending", status, None)
+    # Only "pending" is worth re-polling (it may still fill).
+    def _check(remote_order_id, leg_name):
         try:
             result = fivepaisa.get_order_status(
-                settings.access_token, settings.client_code, "N", remote_order_id
-            )
-            if not result["success"]:
-                reason = _reason_for(remote_order_id)
-                detail = reason or f"status-check failed: {result['error'][:80]}"
-                _save_log(db, "ERROR", f"{stock_name}: [{leg_name}] NOT FILLED — {detail}")
-                unfilled.append(f"{leg_name}: {detail}")
-                continue
-
-            orders = result.get("orders", [])
+                settings.access_token, settings.client_code, "N", remote_order_id)
+            if not result.get("success"):
+                return ("pending", f"status-check failed: {str(result.get('error', ''))[:80]}", None)
+            orders = result.get("orders") or []
             if not orders:
-                reason = _reason_for(remote_order_id)
-                detail = reason or "no status record yet (RemoteOrderID not found)"
-                _save_log(db, "INFO", f"{stock_name}: [{leg_name}] not filled — {detail}")
-                unfilled.append(f"{leg_name}: {detail}")
-                continue
-            # 5paisa may return multiple history entries per order (e.g. Modified → Fully Executed).
-            # Check all entries — if any shows "Fully Executed" the order is filled.
+                return ("pending", "no status record yet", None)
             if any(o.get("Status") == "Fully Executed" for o in orders):
                 exec_rec = next((o for o in orders if o.get("Status") == "Fully Executed"), orders[-1])
                 avg_price = None
@@ -339,23 +337,52 @@ def _confirm_fills(settings, db, stock_name, legs):
                 except (TypeError, ValueError):
                     avg_price = None
                 exch_id = str(exec_rec.get("ExchOrderID") or "") or None
-                fills[leg_name] = {"price": avg_price, "exch_order_id": exch_id}
-                _save_log(db, "INFO",
-                    f"{stock_name}: [{leg_name}] order status = Fully Executed "
-                    f"(fill price {avg_price}, exch id {exch_id}, {len(orders)} record(s))")
+                return ("filled", avg_price, exch_id)
+            status = orders[-1].get("Status", "Unknown")  # most recent entry last
+            # Rejected / Cancelled = terminal, will never fill -> stop polling it.
+            if "reject" in status.lower() or "cancel" in status.lower():
+                return ("failed", status, None)
+            return ("pending", status, None)
+        except Exception as e:
+            _save_log(db, "ERROR", f"{stock_name}: [{leg_name}] order-status check crashed — {_exc_detail(e)}")
+            return ("pending", "status-check crashed", None)
+
+    time.sleep(1)  # initial settle before the first check
+    pending = list(legs)     # [(remote_id, leg_name), ...] still to resolve
+    last_status = {}         # leg_name -> last-seen status text (for the not-filled log)
+
+    for attempt in range(FILL_CONFIRM_ATTEMPTS):
+        still_pending = []
+        for remote_order_id, leg_name in pending:
+            outcome, a, b = _check(remote_order_id, leg_name)
+            if outcome == "filled":
+                fills[leg_name] = {"price": a, "exch_order_id": b}
                 filled.append(leg_name)
-            else:
-                final_status = orders[-1].get("Status", "Unknown")  # most recent entry last
+                _save_log(db, "INFO",
+                    f"{stock_name}: [{leg_name}] Fully Executed (fill price {a}, exch id {b})")
+            elif outcome == "failed":
                 reason = _reason_for(remote_order_id)
                 _save_log(db, "ERROR",
-                    f"{stock_name}: [{leg_name}] NOT FILLED — status={final_status}, "
-                    f"broker reason: {reason or 'none given by broker'} ({len(orders)} record(s))")
-                detail = f"{final_status}" + (f" — {reason}" if reason else "")
-                unfilled.append(f"{leg_name}: {detail}")
-        except Exception as e:
-            _save_log(db, "ERROR",
-                f"{stock_name}: [{leg_name}] order-status check crashed — {_exc_detail(e)}")
-            unfilled.append(f"{leg_name} (status-check crashed)")
+                    f"{stock_name}: [{leg_name}] NOT FILLED — status={a}, "
+                    f"broker reason: {reason or 'none given by broker'}")
+                unfilled.append(f"{leg_name}: {a}" + (f" — {reason}" if reason else ""))
+            else:  # pending -> re-check next round
+                last_status[leg_name] = a
+                still_pending.append((remote_order_id, leg_name))
+        pending = still_pending
+        if not pending:
+            break
+        if attempt < FILL_CONFIRM_ATTEMPTS - 1:
+            time.sleep(FILL_CONFIRM_POLL_SECONDS)
+
+    # Still pending after the whole window = not filled.
+    for remote_order_id, leg_name in pending:
+        reason = _reason_for(remote_order_id)
+        status = last_status.get(leg_name, "Unknown")
+        _save_log(db, "ERROR",
+            f"{stock_name}: [{leg_name}] NOT FILLED after ~{FILL_CONFIRM_ATTEMPTS * FILL_CONFIRM_POLL_SECONDS}s — "
+            f"last status={status}, broker reason: {reason or 'none given by broker'}")
+        unfilled.append(f"{leg_name}: {status}" + (f" — {reason}" if reason else ""))
 
     return filled, unfilled, fills
 

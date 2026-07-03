@@ -1409,15 +1409,17 @@ def test_naked_ce_not_recorded_if_not_executed(mock_broker):
     mock_broker.get_option_chain.return_value = chain_ok(1160)
     mock_broker.get_lot_size.return_value = 400
     mock_broker.place_order.return_value = order_ok(555)               # accepted...
-    mock_broker.get_order_status.return_value = {"success": True, "orders": [{"Status": "Pending"}]}  # ...not filled
+    mock_broker.get_order_status.return_value = {"success": True, "orders": [{"Status": "Pending"}]}  # ...stays pending
     mock_broker.get_order_book.return_value = {"success": True, "orders": []}
 
+    # patch time so the ~10s fill-confirmation poll doesn't actually sleep in the test
     with patch("bot.trade_manager.SessionLocal", TestSession):
         with patch("notifications.email.send_partial_fill_alert") as mock_alert:
-            trade_manager.run_fixed_trades()
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
 
     db = TestSession(); trade = db.query(Trade).first(); db.close()
-    assert trade is None, "an unexecuted CE must NOT be recorded as a live trade"
+    assert trade is None, "an unexecuted CE must NOT be recorded as a live trade (after polling)"
     mock_alert.assert_called_once()
 
 
@@ -1457,3 +1459,33 @@ def test_close_records_actual_exit_fill_not_ltp(mock_now, mock_broker):
     assert trade.pe_exit_price == 7.9
     # P&L from the real fills: (1158-1126.3)+(13.85-5.2)+(7.9-11.1) = 37.15
     assert abs(trade.pnl - 37.15) < 0.01
+
+
+# ── Fill confirmation polls (a slow fill must not be dropped — the BEL case) ─────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_confirm_fills_polls_until_pending_order_fills(mock_broker):
+    """A leg that reads 'Pending' on the first check but fills a couple seconds later
+    must be caught by the ~10s poll window and RECORDED with its real fill — not
+    wrongly dropped (exactly the BEL CE untracked-position bug)."""
+    add(make_settings(), make_watchlist(),
+        make_fixed_trade(strike_type="percent", strike_value=3, month_type="option"))
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1160)
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.place_order.return_value = order_ok(555)
+    # First poll: still Pending. Next poll: Fully Executed (the slightly-slow fill).
+    mock_broker.get_order_status.side_effect = [
+        {"success": True, "orders": [{"Status": "Pending"}]},
+        fill_ok_priced(3.1, "BEL-EX"),
+    ]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("bot.trade_manager.time"):   # skip the poll sleeps
+            trade_manager.run_fixed_trades()
+
+    db = TestSession(); trade = db.query(Trade).first(); db.close()
+    assert trade is not None, "a leg that fills on a later poll MUST be recorded"
+    assert trade.status == "open"
+    assert trade.ce_entry_price == 3.1          # real fill, captured on the 2nd poll
+    assert trade.ce_exch_order_id == "BEL-EX"
