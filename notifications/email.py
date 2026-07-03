@@ -158,6 +158,23 @@ def send_trade_opened_email(stock_name: str, futures_price: float, ce_strike: fl
     _send_email(subject, body)
 
 
+def send_naked_ce_opened_email(stock_name: str, ce_strike, ce_premium, lot_size):
+    """Send email when a naked-CE (option) real-money trade is opened."""
+    subject = f"Trade Opened: {stock_name} (Naked CE Sell)"
+    body = f"""
+    <html><body>
+    <h2 style="color:#2ecc71;">Trade Opened ✅ — Naked CE Sell</h2>
+    <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
+        <tr><td><b>Stock</b></td><td>{stock_name}</td></tr>
+        <tr><td><b>Type</b></td><td>Naked CE Sell</td></tr>
+        <tr><td><b>CE Sold</b></td><td>Strike {ce_strike} @ ₹{ce_premium}</td></tr>
+        <tr><td><b>Lot Size</b></td><td>{lot_size}</td></tr>
+    </table>
+    </body></html>
+    """
+    _send_email(subject, body)
+
+
 def send_trade_closed_email(stock_name: str, reason: str, pnl: float):
     """Send email when a trade is closed with reason and P&L."""
     color = "#2ecc71" if pnl and pnl >= 0 else "#e74c3c"

@@ -1489,3 +1489,59 @@ def test_confirm_fills_polls_until_pending_order_fills(mock_broker):
     assert trade.status == "open"
     assert trade.ce_entry_price == 3.1          # real fill, captured on the 2nd poll
     assert trade.ce_exch_order_id == "BEL-EX"
+
+
+# ── Naked-CE open email: real money only ────────────────────────────────────────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_real_open_sends_email(mock_broker):
+    """A REAL naked-CE trade opening emails the client."""
+    add(make_settings(), make_watchlist(),
+        make_fixed_trade(strike_type="percent", strike_value=3, month_type="option"))  # is_trade=True -> real
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1160)
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.place_order.return_value = order_ok(555)
+    mock_broker.get_order_status.return_value = fill_ok_priced(9.6, "EX1")
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_naked_ce_opened_email") as mock_email:
+            trade_manager.run_fixed_trades()
+
+    mock_email.assert_called_once()
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_paper_open_no_email(mock_broker):
+    """A PAPER naked-CE trade opening does NOT email (real money only)."""
+    add(make_settings(), make_watchlist(),
+        make_fixed_trade(strike_type="percent", strike_value=3, month_type="option", is_trade=False))  # paper
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1160)
+    mock_broker.get_lot_size.return_value = 400
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_naked_ce_opened_email") as mock_email:
+            trade_manager.run_fixed_trades()
+
+    mock_email.assert_not_called()
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_safety_check_excludes_paper_trades(mock_broker):
+    """3:40 PM summary reports ONLY real-money trades — paper trades are excluded."""
+    real = make_open_trade(name="INFY")
+    paper = make_open_trade(name="RELIANCE")
+    paper.is_paper_trade = True
+    add(make_settings(is_trading=True), real, paper)
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1130, 12.0, 10.0)
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_safety_alert_email") as mock_email:
+            count = trade_manager.safety_check()
+
+    assert count == 1, f"only the 1 real trade should be reported (paper excluded), got {count}"
+    mock_email.assert_called_once()
+    summary_arg = mock_email.call_args[0][0]
+    names = [s["stock_name"] for s in summary_arg]
+    assert names == ["INFY"], f"paper trade must be excluded from the summary, got {names}"

@@ -898,6 +898,14 @@ def _place_option_trade(db, settings, ft: FixedTrade):
         f"entry {ce_fill_price}, exch id {ce_exch_id}")
     db.commit()
 
+    # Notify the client when a REAL naked-CE trade opens (paper trades stay silent).
+    if not is_paper:
+        try:
+            from notifications.email import send_naked_ce_opened_email
+            send_naked_ce_opened_email(ft.stock_name, ce_strike, ce_fill_price, lot_size)
+        except Exception as e:
+            _save_log(db, "WARNING", f"{ft.stock_name}: naked-CE opened email failed - {_exc_detail(e)}")
+
 
 def _place_paper_trade(db, settings, ft: FixedTrade):
     """Record prices without placing real orders. Used when Trade = No."""
@@ -1152,6 +1160,14 @@ def run_webhook_trade(stock_name: str, force: bool = False):
                 f"Screener {stock_name}: naked CE sell ({mode}) — strike {ce_strike}, entry {ce_fill_price}, "
                 f"exch id {ce_exch_id}, lot {lot_size}")
             db.commit()
+
+            # Notify the client when a REAL naked-CE trade opens (paper stays silent).
+            if not is_paper:
+                try:
+                    from notifications.email import send_naked_ce_opened_email
+                    send_naked_ce_opened_email(stock_name.upper(), ce_strike, ce_fill_price, lot_size)
+                except Exception as e:
+                    _save_log(db, "WARNING", f"Screener {stock_name}: naked-CE opened email failed - {_exc_detail(e)}")
             return
 
         # ── Collar trade: Buy Futures + Sell CE + Buy PE ────────────────────
@@ -1726,7 +1742,12 @@ def safety_check(trigger: str = "3:40 PM"):
     """
     db = SessionLocal()
     try:
-        open_trades = db.query(Trade).filter(Trade.status == "open").all()
+        # Real-money open trades only — the client does NOT want paper trades in the
+        # 3:40 PM summary (they're excluded here, not just labelled).
+        open_trades = db.query(Trade).filter(
+            Trade.status == "open",
+            Trade.is_paper_trade == False
+        ).all()
         if not open_trades:
             return 0
 
