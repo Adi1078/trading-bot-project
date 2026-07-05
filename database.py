@@ -38,6 +38,7 @@ def _ensure_columns():
             "ui_username": "VARCHAR",
             "ui_password_hash": "VARCHAR",
             "ui_session_secret": "VARCHAR",
+            "manual_pnl_adjustment": "FLOAT DEFAULT 0",
         },
         "trades": {
             "expiry_date": "VARCHAR",

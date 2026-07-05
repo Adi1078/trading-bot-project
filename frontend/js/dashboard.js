@@ -86,6 +86,26 @@ async function loadPnl() {
     document.getElementById("paperClosedCount").textContent = data.paper_closed_count;
 }
 
+// Manually set the displayed Real P&L (to match the broker). Real-money only —
+// paper P&L is never affected. New closed trades keep adding/subtracting from it.
+async function editRealPnl() {
+    const current = (document.getElementById("realPnl").textContent || "").replace(/[₹,\s]/g, "");
+    const input = prompt("Set the Real P&L total to match your broker (₹):", current);
+    if (input === null) return;  // cancelled
+    const target = parseFloat(input);
+    if (isNaN(target)) { showToast("Please enter a valid number", "error"); return; }
+    const data = await api("/api/dashboard/set-real-pnl", {
+        method: "POST",
+        body: JSON.stringify({ target })
+    });
+    if (data && data.success) {
+        showToast("Real P&L updated", "success");
+        loadPnl();
+    } else {
+        showToast((data && data.detail) || "Could not update Real P&L", "error");
+    }
+}
+
 // ── Mobile Navigation ─────────────────────────────────────────────────────────
 
 function scrollToElement(elementId) {

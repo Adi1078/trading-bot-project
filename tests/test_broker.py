@@ -65,7 +65,14 @@ def mock_place_order_failure():
     }
 
 def mock_cancel_order_success():
-    return {"head": {"Status": 0, "StatusDescription": "Success"}}
+    return {"head": {"Status": 0, "StatusDescription": "Success"},
+            "body": {"Status": 0, "Message": "Success"}}
+
+
+def mock_cancel_order_body_fail():
+    # head OK but body-level failure (5paisa's head-vs-body trap)
+    return {"head": {"Status": 0, "StatusDescription": "Success"},
+            "body": {"Status": 2, "Message": "Invalid Input Parameters."}}
 
 def mock_positions_success():
     return {
@@ -168,8 +175,20 @@ def test_cancel_order_success(mock_post):
         json=lambda: mock_cancel_order_success(),
         raise_for_status=lambda: None
     )
-    result = cancel_order("fake_token", "123456789", "1660", "N", "D")
+    result = cancel_order("fake_token", "2400000016897929")
     assert result["success"] is True
+
+
+@patch("broker.fivepaisa.requests.post")
+def test_cancel_order_body_status_failure(mock_post):
+    """head.Status '0' but body.Status != 0 must be treated as a FAILED cancel."""
+    mock_post.return_value = MagicMock(
+        status_code=200,
+        json=lambda: mock_cancel_order_body_fail(),
+        raise_for_status=lambda: None
+    )
+    result = cancel_order("fake_token", "2400000016897929")
+    assert result["success"] is False
 
 @patch("broker.fivepaisa.requests.post")
 def test_get_positions_success(mock_post):

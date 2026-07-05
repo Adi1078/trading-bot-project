@@ -33,6 +33,14 @@ CHEAP_PRICE_THRESHOLD = 100
 # authoritative proof that a leg is actually flat before marking a trade closed.
 SQUAREOFF_SETTLE_SECONDS = 3
 
+# Within a single square-off, each leg is closed SEQUENTIALLY (CE -> PE -> Futures)
+# and gets up to this many attempts: place a marketable order, wait
+# SQUAREOFF_SETTLE_SECONDS, and if it hasn't filled, CANCEL that resting order and
+# try again (so there's never more than one live exit order per leg). On a PROFIT
+# close, if the CE (short) leg still won't close after these attempts we STOP and
+# keep the position hedged; on loss/expiry/manual we continue through the legs.
+SQUAREOFF_LEG_ATTEMPTS = 2
+
 # When a square-off can't be confirmed flat at the broker we retry — but never on
 # every ~10s monitor cycle. We retry at most SQUAREOFF_MAX_ATTEMPTS times, spaced at
 # least SQUAREOFF_RETRY_SECONDS apart, and only while a target is still hit (the
@@ -1530,104 +1538,169 @@ def _open_scrip_codes(db, settings, stock_name):
     return open_codes
 
 
-def _square_off_legs(db, settings, trade: Trade) -> bool:
+def _cancel_resting_order(db, settings, remote_id, tag):
     """
-    Close a filled position by placing opposite-side marketable-limit orders AND
-    confirming each leg is actually flat at 5paisa before reporting success.
+    Cancel the resting (unfilled) exit order identified by our RemoteOrderID, before
+    we place a replacement — so there's never more than one live order per leg.
 
-    Filled positions can't be "cancelled" — they must be reversed with an opposite
-    order (priced as a marketable limit per the broker's no-market-order rule).
-    Entry sides are fixed by the strategy:
-        Futures = Buy, CE = Sell, PE = Buy
-    so the exits are the opposite:
-        Futures = Sell, CE = Buy, PE = Sell
-    Only legs that were actually opened (scrip code present) are squared off, so this
-    also handles the naked-CE trade.
+    Looks the order up (OrderStatus by RemoteOrderID) to get its ExchangeOrderID +
+    status, then cancels it. Returns True when the order is confirmed GONE (cancelled,
+    already executed, or not resting on the exchange); False only when we cannot be
+    sure it is gone — in which case the caller MUST NOT place another order (no
+    stacking). Never raises.
+    """
+    try:
+        st = fivepaisa.get_order_status(settings.access_token, settings.client_code, "N", remote_id)
+    except Exception as e:
+        _save_log(db, "WARNING", f"{tag} cancel: order-status lookup crashed - {_exc_detail(e)}")
+        return False
+    if not st.get("success"):
+        _save_log(db, "WARNING", f"{tag} cancel: order-status lookup failed - {st.get('error')}")
+        return False
+    recs = st.get("orders") or []
+    if not recs:
+        return True  # no record -> nothing resting
+    rec = recs[-1]
+    status = str(rec.get("Status") or "")
+    if status == "Fully Executed":
+        return True  # it filled -> gone (the position re-check will see it flat)
+    exch_id = str(rec.get("ExchOrderID") or "")
+    if not exch_id or exch_id == "0":
+        return True  # no exchange id -> not resting on the exchange -> nothing to cancel
+    c = fivepaisa.cancel_order(settings.access_token, exch_id)
+    if c.get("success"):
+        _save_log(db, "INFO", f"{tag} cancelled previous resting order (exch id {exch_id})")
+        return True
+    if "execut" in str(c.get("error", "")).lower():
+        return True  # cancel says it already executed -> gone
+    _save_log(db, "WARNING", f"{tag} cancel FAILED (exch id {exch_id}) - {c.get('error')}")
+    return False
 
-    Returns:
-      True  -> every opened leg is VERIFIED flat at the broker (NetQty 0 / absent).
-      False -> at least one leg could NOT be confirmed closed (order rejected, not
-               filled, price/quote failure, or broker unreachable). The caller MUST
-               keep the trade OPEN so the dashboard matches reality and the de-dup
-               guard keeps blocking a duplicate real-money trade.
 
-    Idempotent: a leg already flat at the broker is NOT re-squared, so a retry can
-    never flip the position to the opposite side. Every step is logged with a
-    [SQUAREOFF] tag so a failure can be traced to the exact leg and reason.
+def _square_off_one_leg(db, settings, trade, scrip_code, side, leg, lot_size):
+    """
+    Flatten ONE leg with up to SQUAREOFF_LEG_ATTEMPTS cancel-then-replace attempts:
+    place a marketable exit order, wait SQUAREOFF_SETTLE_SECONDS, and if the position
+    isn't flat, cancel that order and try again. Returns True only when the leg is
+    VERIFIED flat at the broker, else False. Never raises.
+    """
+    tag = f"[SQUAREOFF {trade.stock_name} #{trade.id}]"
+    prev_remote = None   # a previous attempt's still-resting order to cancel first
+
+    for attempt in range(1, SQUAREOFF_LEG_ATTEMPTS + 1):
+        leg_tag = f"{tag} [{leg} {scrip_code} {side}] attempt {attempt}/{SQUAREOFF_LEG_ATTEMPTS}"
+
+        # 1. Ground truth: is this leg already flat? (also the idempotent skip)
+        open_codes = _open_scrip_codes(db, settings, trade.stock_name)
+        if open_codes is None:
+            _save_log(db, "ERROR", f"{leg_tag} cannot read positions - leaving leg OPEN")
+            return False
+        if scrip_code not in open_codes:
+            _save_log(db, "INFO", f"{leg_tag} confirmed FLAT at broker")
+            return True
+
+        # 2. Before re-placing, cancel the previous attempt's resting order (no stacking).
+        if prev_remote is not None:
+            if not _cancel_resting_order(db, settings, prev_remote, leg_tag):
+                _save_log(db, "ERROR",
+                    f"{leg_tag} could not confirm the previous order is cancelled - NOT placing "
+                    "another (avoids stacking); leaving leg OPEN")
+                return False
+            prev_remote = None
+
+        # 3. Place a fresh marketable exit order.
+        ltp = _leg_ltp(db, settings, scrip_code, leg)
+        price = _order_price(db, settings, scrip_code, side, ltp, leg)
+        if price == 0:
+            _save_log(db, "ERROR", f"{leg_tag} no valid exit price (ltp={ltp}) - skipping this attempt")
+            continue
+        remote = generate_remote_order_id(f"{trade.stock_name}_{leg}_EXIT")
+        _save_log(db, "INFO", f"{leg_tag} placing exit order @ {price} (ltp={ltp})")
+        try:
+            result = fivepaisa.place_order(
+                settings.access_token, "N", "D", scrip_code, side, price, lot_size, False, remote)
+        except Exception as e:
+            _save_log(db, "ERROR", f"{leg_tag} place_order CRASHED - {_exc_detail(e)}")
+            continue
+        if not result.get("success"):
+            _save_log(db, "ERROR", f"{leg_tag} exit order REJECTED - {result.get('error')}")
+            continue  # nothing resting to cancel; just retry
+        prev_remote = remote
+        _save_log(db, "INFO",
+            f"{leg_tag} exit order accepted (broker_order_id={result.get('broker_order_id')}) "
+            "- confirming via positions after settle")
+
+        # 4. Let it settle; the NEXT loop iteration re-reads positions to confirm.
+        time.sleep(SQUAREOFF_SETTLE_SECONDS)
+
+    # Final check after the last attempt's settle wait.
+    open_codes = _open_scrip_codes(db, settings, trade.stock_name)
+    if open_codes is not None and scrip_code not in open_codes:
+        _save_log(db, "INFO", f"{tag} [{leg}] confirmed FLAT after {SQUAREOFF_LEG_ATTEMPTS} attempts")
+        return True
+    _save_log(db, "ERROR", f"{tag} [{leg}] NOT flat after {SQUAREOFF_LEG_ATTEMPTS} attempts")
+    return False
+
+
+def _square_off_legs(db, settings, trade: Trade, reason: str = "manual") -> bool:
+    """
+    Close a filled position by reversing each leg with opposite-side marketable-limit
+    orders, SEQUENTIALLY in the order CE -> PE -> Futures, confirming each leg flat at
+    5paisa before moving to the next. Each leg gets up to SQUAREOFF_LEG_ATTEMPTS
+    cancel-then-replace attempts (see _square_off_one_leg).
+
+    Entry sides are Futures=Buy, CE=Sell, PE=Buy, so exits are Futures=Sell, CE=Buy,
+    PE=Sell. Only opened legs (scrip code present) are squared off, so this also
+    handles the naked-CE trade.
+
+    Reason-dependent safety — the CE is the SHORT (unlimited-risk) leg:
+      * PROFIT close: if the CE won't close after its attempts, STOP and leave PE +
+        Futures OPEN as hedges (never leave a naked short while sitting in profit).
+        Only a CE failure stops the sequence; PE/Futures failures never do.
+      * LOSS / EXPIRY / MANUAL close: always CONTINUE through CE -> PE -> Futures,
+        closing whatever fills (the client wants out).
+
+    Returns True only when every opened leg is VERIFIED flat at the broker; else False
+    (caller keeps the trade OPEN + alerts). Idempotent: an already-flat leg is skipped.
     """
     tag = f"[SQUAREOFF {trade.stock_name} #{trade.id}]"
     lot_size = trade.lot_size or 1
     _save_log(db, "INFO",
-        f"{tag} STEP 1/5 start. lot_size={lot_size}, legs: "
-        f"FUT={trade.futures_scrip_code}, CE={trade.ce_scrip_code}, PE={trade.pe_scrip_code}")
+        f"{tag} start (reason={reason}, order CE->PE->FUT). lot_size={lot_size}, legs: "
+        f"CE={trade.ce_scrip_code}, PE={trade.pe_scrip_code}, FUT={trade.futures_scrip_code}")
 
     square_offs = [
-        (trade.futures_scrip_code, "S", "FUT"),
         (trade.ce_scrip_code, "B", "CE"),
         (trade.pe_scrip_code, "S", "PE"),
+        (trade.futures_scrip_code, "S", "FUT"),
     ]
     legs = [(str(code), side, leg) for code, side, leg in square_offs if code]
     if not legs:
         _save_log(db, "WARNING", f"{tag} no legs with a scrip code - nothing to square off (treating as flat)")
         return True
 
-    # STEP 2 — ground truth BEFORE we touch anything: which legs are still open.
-    _save_log(db, "INFO", f"{tag} STEP 2/5 reading broker positions (pre-square-off)")
-    open_codes = _open_scrip_codes(db, settings, trade.stock_name)
-    if open_codes is None:
-        _save_log(db, "ERROR",
-            f"{tag} STEP 2/5 FAILED - cannot read positions; aborting square-off, trade stays OPEN")
-        return False
-
-    # STEP 3 — place an opposite order for every leg that is STILL open.
+    all_flat = True
     for scrip_code, side, leg in legs:
-        leg_tag = f"{tag} STEP 3/5 [{leg} {scrip_code} {side}]"
-        if scrip_code not in open_codes:
-            _save_log(db, "INFO", f"{leg_tag} already flat at broker - skipping (idempotent)")
+        leg_flat = _square_off_one_leg(db, settings, trade, scrip_code, side, leg, lot_size)
+        if leg_flat:
             continue
-        ltp = _leg_ltp(db, settings, scrip_code, leg)
-        price = _order_price(db, settings, scrip_code, side, ltp, leg)
-        if price == 0:
+        all_flat = False
+        # On a PROFIT close, a stuck CE (short) must NOT lead us to close its hedges.
+        if reason == "profit" and leg == "CE":
             _save_log(db, "ERROR",
-                f"{leg_tag} could not derive a valid exit price (ltp={ltp}); a 0 limit would not "
-                "fill - skipping placement, will retry next monitor cycle")
-            continue
-        _save_log(db, "INFO", f"{leg_tag} placing exit order @ {price} (ltp={ltp})")
-        try:
-            result = fivepaisa.place_order(
-                settings.access_token, "N", "D", scrip_code, side, price, lot_size, False,
-                generate_remote_order_id(f"{trade.stock_name}_{leg}_EXIT")
-            )
-        except Exception as e:
-            _save_log(db, "ERROR", f"{leg_tag} place_order CRASHED - {_exc_detail(e)}")
-            continue
-        if not result.get("success"):
-            _save_log(db, "ERROR", f"{leg_tag} exit order REJECTED by broker - {result.get('error')}")
-        else:
-            _save_log(db, "INFO",
-                f"{leg_tag} exit order accepted (broker_order_id={result.get('broker_order_id')}) "
-                "- accepted is NOT a fill, confirming via positions next")
+                f"{tag} CE could not be squared off on PROFIT hit - STOPPING; PE + Futures kept "
+                "OPEN as hedges. Trade stays open (client alerted); will retry next cycle.")
+            return False
+        # Otherwise (loss/expiry/manual, or a non-CE leg on profit) continue to the next leg.
+        _save_log(db, "INFO",
+            f"{tag} [{leg}] not closed - continuing to next leg (reason={reason}).")
 
-    # STEP 4 — let the exchange settle, then re-read positions: the AUTHORITATIVE
-    # check. An accepted order is not a guaranteed fill, so we only trust positions.
-    _save_log(db, "INFO",
-        f"{tag} STEP 4/5 waiting {SQUAREOFF_SETTLE_SECONDS}s then re-reading positions (post-square-off)")
-    time.sleep(SQUAREOFF_SETTLE_SECONDS)
-    open_codes = _open_scrip_codes(db, settings, trade.stock_name)
-    if open_codes is None:
+    if all_flat:
+        _save_log(db, "INFO", f"{tag} SUCCESS - all legs confirmed flat at broker.")
+    else:
         _save_log(db, "ERROR",
-            f"{tag} STEP 4/5 FAILED - cannot re-read positions to confirm; trade stays OPEN")
-        return False
-
-    # STEP 5 — verdict: every leg must be flat at the broker.
-    still_open = [leg for scrip_code, _side, leg in legs if scrip_code in open_codes]
-    if still_open:
-        _save_log(db, "ERROR",
-            f"{tag} STEP 5/5 square-off NOT confirmed - still OPEN at broker: {', '.join(still_open)}. "
-            "Trade kept OPEN, will retry next monitor cycle.")
-        return False
-    _save_log(db, "INFO", f"{tag} STEP 5/5 SUCCESS - all legs confirmed flat at broker.")
-    return True
+            f"{tag} square-off NOT fully confirmed - some legs still OPEN. Trade kept OPEN, will retry.")
+    return all_flat
 
 
 def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
@@ -1674,7 +1747,7 @@ def _close_trade(db, settings, trade: Trade, reason: str, current_prices=None):
             f"{tag} exit triggered. reason={reason}, square-off attempt "
             f"{trade.squareoff_attempts}/{SQUAREOFF_MAX_ATTEMPTS}")
 
-        squared_off = _square_off_legs(db, settings, trade)
+        squared_off = _square_off_legs(db, settings, trade, reason)
         if not squared_off:
             _save_log(db, "ERROR",
                 f"{tag} square-off attempt {trade.squareoff_attempts}/{SQUAREOFF_MAX_ATTEMPTS} "

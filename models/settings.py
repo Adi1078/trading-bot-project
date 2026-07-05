@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean
+from sqlalchemy import Column, Integer, String, Boolean, Float
 from database import Base
 
 
@@ -36,3 +36,9 @@ class Settings(Base):
     ui_username = Column(String, nullable=True)        # login page username (client-set)
     ui_password_hash = Column(String, nullable=True)   # PBKDF2 hash of login password
     ui_session_secret = Column(String, nullable=True)  # signing key for the trusted-device cookie
+
+    # Manual adjustment for the displayed REAL-money P&L only (never paper). The
+    # dashboard shows (sum of real closed-trade P&L) + this number, so the client can
+    # type the total they want shown (to match the broker) and future closed trades
+    # keep adding/subtracting from it. Display-only; never touches trade records.
+    manual_pnl_adjustment = Column(Float, default=0.0)

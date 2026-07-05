@@ -532,6 +532,47 @@ def positions_resp(*open_scrip_codes):
     }
 
 
+def setup_sequential_squareoff(mock_broker, open_scrips, exit_fills=None, never_fills=None):
+    """
+    Model the CE->PE->Futures SEQUENTIAL square-off for tests: each leg's position
+    reads OPEN (NetQty 1) until its exit order is placed, then FLAT (NetQty 0). A
+    flat leg carries its exit average rate so _actual_exit_fills can read it.
+      open_scrips: iterable of scrip codes initially open (a leg NOT listed is treated
+                   as already flat / skipped).
+      exit_fills:  {scrip: (avg_rate_field, price)} e.g. ("SellAvgRate", 1158.0).
+      never_fills: scrip codes that STAY open even after an exit order is placed
+                   (simulates a leg the market outruns).
+    Also wires get_order_status + cancel_order so the cancel-then-replace path works.
+    Returns the shared state dict (state["placed"]).
+    """
+    state = {"placed": set()}
+    exit_fills = exit_fills or {}
+    never = set(never_fills or [])
+
+    def _positions(*a, **k):
+        pos = []
+        for sc in open_scrips:
+            flat = (sc in state["placed"]) and (sc not in never)
+            p = {"ScripCode": sc, "NetQty": 0 if flat else 1}
+            if flat and sc in exit_fills:
+                field, price = exit_fills[sc]
+                p[field] = price
+            pos.append(p)
+        return {"success": True, "positions": pos}
+
+    def _place(token, exch, etype, scrip, side, *a, **k):
+        state["placed"].add(str(scrip))
+        return order_ok(999)
+
+    mock_broker.get_positions.side_effect = _positions
+    mock_broker.place_order.side_effect = _place
+    # a resting (Pending) order with an ExchOrderID, so cancel-then-replace can cancel it
+    mock_broker.get_order_status.return_value = {
+        "success": True, "orders": [{"Status": "Pending", "ExchOrderID": "111"}]}
+    mock_broker.cancel_order.return_value = {"success": True}
+    return state
+
+
 @patch("bot.trade_manager.fivepaisa")
 @patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
 def test_squareoff_keeps_trade_open_when_not_confirmed_flat(mock_now, mock_broker):
@@ -571,12 +612,7 @@ def test_squareoff_marks_closed_when_positions_confirm_flat(mock_now, mock_broke
     the trade is marked closed with the live exit P&L."""
     add(make_settings(), make_open_trade(profit_target=20))
     mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)
-    mock_broker.place_order.return_value = order_ok(999)
-    # Pre-check: all three legs open. Post-check: account flat.
-    mock_broker.get_positions.side_effect = [
-        positions_resp("INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"),
-        positions_resp(),  # flat
-    ]
+    setup_sequential_squareoff(mock_broker, {"INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"})
 
     with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
         with patch("bot.trade_manager.SessionLocal", TestSession):
@@ -590,7 +626,7 @@ def test_squareoff_marks_closed_when_positions_confirm_flat(mock_now, mock_broke
     assert trade.status == "closed"
     assert trade.close_reason == "profit"
     assert trade.pnl > 20
-    assert mock_broker.place_order.call_count == 3  # all 3 legs squared off
+    assert mock_broker.place_order.call_count == 3  # all 3 legs squared off (one order each)
 
 
 @patch("bot.trade_manager.fivepaisa")
@@ -603,12 +639,8 @@ def test_squareoff_is_idempotent_skips_already_flat_legs(mock_now, mock_broker):
     """
     add(make_settings(), make_open_trade(profit_target=20))
     mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)
-    mock_broker.place_order.return_value = order_ok(999)
-    # Pre-check: PE already flat (only FUT+CE open). Post-check: fully flat.
-    mock_broker.get_positions.side_effect = [
-        positions_resp("INFY_FUT", "INFY_CE_1150"),
-        positions_resp(),
-    ]
+    # PE already flat (not in the open set); only FUT + CE are open.
+    setup_sequential_squareoff(mock_broker, {"INFY_FUT", "INFY_CE_1150"})
 
     with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
         with patch("bot.trade_manager.SessionLocal", TestSession):
@@ -620,9 +652,9 @@ def test_squareoff_is_idempotent_skips_already_flat_legs(mock_now, mock_broker):
     db.close()
 
     assert trade.status == "closed"
-    # Only FUT and CE were re-squared; the already-flat PE leg was skipped.
-    assert mock_broker.place_order.call_count == 2
+    # Only CE and FUT were squared; the already-flat PE leg was skipped (no order).
     squared_scrips = [call.args[3] for call in mock_broker.place_order.call_args_list]
+    assert mock_broker.place_order.call_count == 2
     assert "INFY_PE_1100" not in squared_scrips
 
 
@@ -651,8 +683,10 @@ def test_squareoff_not_retried_within_cooldown_and_emails_once(mock_now, mock_br
     db.close()
 
     assert trade.status == "open"
-    assert trade.squareoff_attempts == 1          # only ONE attempt despite two cycles
-    assert mock_broker.place_order.call_count == 3  # 3 legs, one attempt only
+    assert trade.squareoff_attempts == 1          # only ONE _close_trade attempt despite two cycles
+    # profit close + CE never fills -> CE gets its 2 cancel-then-replace attempts, then
+    # STOP (keep PE/FUT hedged). So 2 CE orders, and no second round from cycle 2.
+    assert mock_broker.place_order.call_count == 2
     mock_alert.assert_called_once()                # client emailed exactly once
 
 
@@ -1432,19 +1466,15 @@ def test_close_records_actual_exit_fill_not_ltp(mock_now, mock_broker):
     (the real fill), not the LTP at the close moment — so P&L matches the broker."""
     add(make_settings(), make_open_trade(profit_target=20))
     mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # LTP (profit)
-    mock_broker.place_order.return_value = order_ok(999)
     # Actual broker fills differ from the LTP. Long legs (FUT/PE) close by SELL ->
     # SellAvgRate; short CE closes by BUY -> BuyAvgRate.
-    exit_positions = {"success": True, "positions": [
-        {"ScripCode": "INFY_FUT",     "NetQty": 0, "SellAvgRate": 1158.0, "BuyAvgRate": 1126.3},
-        {"ScripCode": "INFY_CE_1150", "NetQty": 0, "BuyAvgRate": 5.2,    "SellAvgRate": 13.85},
-        {"ScripCode": "INFY_PE_1100", "NetQty": 0, "SellAvgRate": 7.9,   "BuyAvgRate": 11.1},
-    ]}
-    mock_broker.get_positions.side_effect = [
-        positions_resp("INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"),  # pre-check (open)
-        positions_resp(),                                            # post-check (flat)
-        exit_positions,                                              # actual-exit-fill read
-    ]
+    setup_sequential_squareoff(
+        mock_broker, {"INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"},
+        exit_fills={
+            "INFY_FUT": ("SellAvgRate", 1158.0),
+            "INFY_CE_1150": ("BuyAvgRate", 5.2),
+            "INFY_PE_1100": ("SellAvgRate", 7.9),
+        })
 
     with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
         with patch("bot.trade_manager.SessionLocal", TestSession):
@@ -1545,3 +1575,119 @@ def test_safety_check_excludes_paper_trades(mock_broker):
     summary_arg = mock_email.call_args[0][0]
     names = [s["stock_name"] for s in summary_arg]
     assert names == ["INFY"], f"paper trade must be excluded from the summary, got {names}"
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_closes_ce_then_pe_then_futures(mock_now, mock_broker):
+    """Square-off places the exit orders in CE -> PE -> Futures order (the short CE
+    leg first)."""
+    add(make_settings(), make_open_trade(profit_target=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # profit
+    setup_sequential_squareoff(mock_broker, {"INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"})
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_trade_closed_email"):
+                trade_manager.monitor_open_trades()
+
+    # scrip_code is the 4th positional arg (index 3) of place_order
+    scrips = [c.args[3] for c in mock_broker.place_order.call_args_list]
+    assert scrips == ["INFY_CE_1150", "INFY_PE_1100", "INFY_FUT"], \
+        f"expected exit order CE -> PE -> FUT, got {scrips}"
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_profit_stops_and_keeps_hedges_if_ce_fails(mock_now, mock_broker):
+    """PROFIT close + CE won't close -> STOP: do NOT place PE/Futures exit orders
+    (keep them as hedges), keep the trade open, alert the client. Cancel-then-replace
+    is used between the CE's two attempts."""
+    add(make_settings(), make_open_trade(profit_target=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # profit
+    setup_sequential_squareoff(
+        mock_broker, {"INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"},
+        never_fills={"INFY_CE_1150"})   # CE keeps getting outrun
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_squareoff_failed_email") as mock_alert:
+                trade_manager.monitor_open_trades()
+
+    db = TestSession(); trade = db.query(Trade).first(); db.close()
+    assert trade.status == "open"          # never marked closed
+    scrips = [c.args[3] for c in mock_broker.place_order.call_args_list]
+    assert set(scrips) == {"INFY_CE_1150"}, f"only CE should be attempted on profit, got {scrips}"
+    assert mock_broker.place_order.call_count == 2         # CE tried twice (cancel-then-replace)
+    assert mock_broker.cancel_order.called                # the 1st CE order was cancelled before the 2nd
+    mock_alert.assert_called_once()
+
+
+@patch("bot.trade_manager.fivepaisa")
+@patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
+def test_squareoff_loss_continues_to_pe_and_futures_if_ce_fails(mock_now, mock_broker):
+    """LOSS close + CE won't close -> CONTINUE: still square off PE and Futures
+    (close whatever fills). Only the CE is left open."""
+    add(make_settings(), make_open_trade(loss_limit=20))
+    mock_broker.get_market_quote.return_value = multi_quote_ok(1100, 13.85, 11.1)  # ~ -26 loss
+    setup_sequential_squareoff(
+        mock_broker, {"INFY_FUT", "INFY_CE_1150", "INFY_PE_1100"},
+        never_fills={"INFY_CE_1150"})   # CE won't close; PE + FUT will
+
+    with patch("bot.trade_manager.SQUAREOFF_SETTLE_SECONDS", 0):
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_squareoff_failed_email"):
+                trade_manager.monitor_open_trades()
+
+    scrips = [c.args[3] for c in mock_broker.place_order.call_args_list]
+    # CE attempted (twice), and PE + Futures were still squared off (continued).
+    assert "INFY_PE_1100" in scrips and "INFY_FUT" in scrips, f"PE+FUT must be closed on loss, got {scrips}"
+    assert scrips.count("INFY_CE_1150") == 2              # CE got its 2 cancel-then-replace attempts
+    db = TestSession(); trade = db.query(Trade).first(); db.close()
+    assert trade.status == "open"          # not fully flat (CE still open) -> stays open
+
+
+# ── Manual Real-P&L adjustment (dashboard override; real-only, paper untouched) ──
+
+def test_manual_real_pnl_adjustment_real_only_and_keeps_adding():
+    from routes.dashboard import get_total_pnl, set_real_pnl
+    real = make_open_trade(name="INFY"); real.status = "closed"; real.pnl = 1000.0
+    paper = make_open_trade(name="RELIANCE"); paper.status = "closed"; paper.pnl = 500.0
+    paper.is_paper_trade = True
+    add(make_settings(), real, paper)
+
+    db = TestSession()
+    before = get_total_pnl(db)
+    assert before["real_pnl"] == 1000.0 and before["paper_pnl"] == 500.0
+
+    # client sets the REAL total to 800 (e.g. broker net after charges)
+    set_real_pnl({"target": 800.0}, db)
+    after = get_total_pnl(db)
+    assert after["real_pnl"] == 800.0                 # shows the client's number
+    assert after["paper_pnl"] == 500.0                # paper P&L NOT affected
+    assert after["manual_pnl_adjustment"] == -200.0
+    assert after["real_pnl_computed"] == 1000.0       # bot's raw sum unchanged
+    db.close()
+
+    # a new real trade closes at +300 -> displayed real P&L becomes 800 + 300
+    db = TestSession()
+    nt = make_open_trade(name="SBIN"); nt.status = "closed"; nt.pnl = 300.0
+    db.add(nt); db.commit()
+    after2 = get_total_pnl(db)
+    assert after2["real_pnl"] == 1100.0               # kept adding from the client's number
+    assert after2["paper_pnl"] == 500.0               # still unaffected
+    db.close()
+
+
+def test_set_real_pnl_rejects_non_number():
+    from routes.dashboard import set_real_pnl
+    from fastapi import HTTPException
+    add(make_settings())
+    db = TestSession()
+    try:
+        set_real_pnl({"target": "abc"}, db)
+        assert False, "should have raised for a non-number target"
+    except HTTPException as e:
+        assert e.status_code == 400
+    finally:
+        db.close()

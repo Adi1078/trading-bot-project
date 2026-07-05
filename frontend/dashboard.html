@@ -36,7 +36,10 @@
     <div class="stats-group-title">Real Trades</div>
     <div class="stats-row">
         <div class="stat-card">
-            <div class="label">Real P&L</div>
+            <div class="label">Real P&L
+                <a onclick="editRealPnl()" title="Manually set to match your broker"
+                   style="cursor:pointer;font-size:0.72em;opacity:0.65;margin-left:6px;text-decoration:underline;">✎ edit</a>
+            </div>
             <div class="value" id="realPnl">₹0.00</div>
         </div>
         <div class="stat-card" onclick="scrollToElement('liveTrades')" style="cursor:pointer;">
@@ -129,6 +132,6 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/static/js/dashboard.js?v=8"></script>
+<script src="/static/js/dashboard.js?v=9"></script>
 </body>
 </html>

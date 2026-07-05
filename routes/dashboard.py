@@ -24,18 +24,58 @@ def get_total_pnl(db: Session = Depends(get_db)):
     real_open = [t for t in open_trades if not t.is_paper_trade]
     paper_open = [t for t in open_trades if t.is_paper_trade]
 
-    real_pnl = sum(t.pnl for t in real_closed if t.pnl is not None)
-    paper_pnl = sum(t.pnl for t in paper_closed if t.pnl is not None)
+    real_pnl_computed = sum(t.pnl for t in real_closed if t.pnl is not None)
+    paper_pnl = sum(t.pnl for t in paper_closed if t.pnl is not None)  # NEVER adjusted
+
+    # Client's manual adjustment to the REAL P&L only (to match the broker). The
+    # displayed real P&L = computed sum + adjustment; new closed trades keep adding
+    # to the computed sum, so the displayed total continues from the client's number.
+    settings = db.query(Settings).first()
+    adjustment = (settings.manual_pnl_adjustment or 0.0) if settings else 0.0
+    real_pnl = real_pnl_computed + adjustment
 
     return {
-        "total_pnl": round(real_pnl, 2),   # real-money only (paper excluded)
+        "total_pnl": round(real_pnl, 2),   # real-money only (paper excluded), incl. adjustment
         "real_pnl": round(real_pnl, 2),
+        "real_pnl_computed": round(real_pnl_computed, 2),  # bot's raw sum (before adjustment)
+        "manual_pnl_adjustment": round(adjustment, 2),
         "paper_pnl": round(paper_pnl, 2),
         "real_open_count": len(real_open),
         "real_closed_count": len(real_closed),
         "paper_open_count": len(paper_open),
         "paper_closed_count": len(paper_closed),
     }
+
+
+@router.post("/set-real-pnl")
+def set_real_pnl(payload: dict, db: Session = Depends(get_db)):
+    """
+    Manually set the displayed REAL-money P&L total (to match the broker). Stores an
+    adjustment = target - (sum of real closed-trade P&L), so the shown total becomes
+    `target` and future closed trades keep adding/subtracting from it. Paper P&L is
+    never affected; no trade records are changed.
+    """
+    try:
+        target = float(payload.get("target"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="target must be a number")
+
+    real_closed = db.query(Trade).filter(
+        Trade.status == "closed", Trade.is_paper_trade == False).all()
+    computed = sum(t.pnl for t in real_closed if t.pnl is not None)
+
+    settings = db.query(Settings).first()
+    if not settings:
+        raise HTTPException(status_code=400, detail="Settings not initialised")
+    settings.manual_pnl_adjustment = round(target - computed, 2)
+
+    log = Log(level="INFO",
+              message=f"Real P&L manually set to {round(target, 2)} "
+                      f"(computed {round(computed, 2)}, adjustment {settings.manual_pnl_adjustment})")
+    db.add(log)
+    db.commit()
+    return {"success": True, "real_pnl": round(target, 2),
+            "manual_pnl_adjustment": settings.manual_pnl_adjustment}
 
 
 @router.get("/live-trades")

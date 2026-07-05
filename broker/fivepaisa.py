@@ -227,32 +227,42 @@ def place_order(access_token, exchange, exchange_type, scrip_code, order_type,
         return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
-def cancel_order(access_token, broker_order_id, scrip_code, exchange, exchange_type):
-    """Cancel an open order on 5paisa."""
+def cancel_order(access_token, exch_order_id):
+    """
+    Cancel a RESTING (not-yet-executed) order on 5paisa by its EXCHANGE order id.
+
+    Per the official Cancel Order API, cancel works only on a pending order and
+    requires the ExchangeOrderID (NOT the BrokerOrderID). Like every 5paisa
+    endpoint, the real outcome is in body.Status (0 = cancelled) — head.status can
+    read "0" even on a body-level failure, so we check BOTH.
+
+    Returns {"success": True} if cancelled, else {"success": False, "error": ...}.
+    """
     app_key, _, _, _, _ = _creds()
     url = f"{BASE_URL}/V1/CancelOrderRequest"
     payload = {
         "head": {"key": app_key},
-        "body": {
-            "BrokerOrderID": broker_order_id,
-            "ScripCode": scrip_code,
-            "Exchange": exchange,
-            "ExchangeType": exchange_type
-        }
+        "body": {"ExchOrderID": str(exch_order_id)},
     }
     try:
         response = requests.post(url, json=payload, headers=_get_headers(access_token), timeout=10)
         response.raise_for_status()
         data = response.json()
 
-        if _head_ok(data):
+        if not _head_ok(data):
+            logger.error(f"cancel_order head error for {exch_order_id}: {_head_error(data)}")
+            return {"success": False, "error": _head_error(data)}
+
+        body = data.get("body") or {}
+        if body.get("Status") == 0:
             return {"success": True}
 
-        logger.error(f"cancel_order failed for order {broker_order_id}: {_head_error(data)}")
-        return {"success": False, "error": _head_error(data)}
+        err = body.get("Message") or f"cancel body.Status={body.get('Status')}"
+        logger.error(f"cancel_order failed for {exch_order_id}: {err}")
+        return {"success": False, "error": err, "status": body.get("Status")}
 
     except Exception as e:
-        logger.error(f"cancel_order exception for order {broker_order_id}: {e}", exc_info=True)
+        logger.error(f"cancel_order exception for {exch_order_id}: {e}", exc_info=True)
         return {"success": False, "error": f"{e}\n{traceback.format_exc()}"}
 
 
