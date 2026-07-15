@@ -1579,8 +1579,8 @@ def test_safety_check_excludes_paper_trades(mock_broker):
 
 @patch("bot.trade_manager.fivepaisa")
 @patch("bot.trade_manager.get_ist_now", return_value=datetime(2026, 5, 20, 10, 30))
-def test_squareoff_closes_ce_then_pe_then_futures(mock_now, mock_broker):
-    """Square-off places the exit orders in CE -> PE -> Futures order (the short CE
+def test_squareoff_closes_ce_then_futures_then_pe(mock_now, mock_broker):
+    """Square-off places the exit orders in CE -> Futures -> PE order (the short CE
     leg first)."""
     add(make_settings(), make_open_trade(profit_target=20))
     mock_broker.get_market_quote.return_value = multi_quote_ok(1160, 5.0, 8.0)  # profit
@@ -1593,8 +1593,8 @@ def test_squareoff_closes_ce_then_pe_then_futures(mock_now, mock_broker):
 
     # scrip_code is the 4th positional arg (index 3) of place_order
     scrips = [c.args[3] for c in mock_broker.place_order.call_args_list]
-    assert scrips == ["INFY_CE_1150", "INFY_PE_1100", "INFY_FUT"], \
-        f"expected exit order CE -> PE -> FUT, got {scrips}"
+    assert scrips == ["INFY_CE_1150", "INFY_FUT", "INFY_PE_1100"], \
+        f"expected exit order CE -> FUT -> PE, got {scrips}"
 
 
 @patch("bot.trade_manager.fivepaisa")

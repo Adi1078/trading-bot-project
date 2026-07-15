@@ -33,7 +33,7 @@ CHEAP_PRICE_THRESHOLD = 100
 # authoritative proof that a leg is actually flat before marking a trade closed.
 SQUAREOFF_SETTLE_SECONDS = 3
 
-# Within a single square-off, each leg is closed SEQUENTIALLY (CE -> PE -> Futures)
+# Within a single square-off, each leg is closed SEQUENTIALLY (CE -> Futures -> PE)
 # and gets up to this many attempts: place a marketable order, wait
 # SQUAREOFF_SETTLE_SECONDS, and if it hasn't filled, CANCEL that resting order and
 # try again (so there's never more than one live exit order per leg). On a PROFIT
@@ -1657,7 +1657,7 @@ def _square_off_legs(db, settings, trade: Trade, reason: str = "manual") -> bool
       * PROFIT close: if the CE won't close after its attempts, STOP and leave PE +
         Futures OPEN as hedges (never leave a naked short while sitting in profit).
         Only a CE failure stops the sequence; PE/Futures failures never do.
-      * LOSS / EXPIRY / MANUAL close: always CONTINUE through CE -> PE -> Futures,
+      * LOSS / EXPIRY / MANUAL close: always CONTINUE through CE -> Futures -> PE,
         closing whatever fills (the client wants out).
 
     Returns True only when every opened leg is VERIFIED flat at the broker; else False
@@ -1666,13 +1666,13 @@ def _square_off_legs(db, settings, trade: Trade, reason: str = "manual") -> bool
     tag = f"[SQUAREOFF {trade.stock_name} #{trade.id}]"
     lot_size = trade.lot_size or 1
     _save_log(db, "INFO",
-        f"{tag} start (reason={reason}, order CE->PE->FUT). lot_size={lot_size}, legs: "
-        f"CE={trade.ce_scrip_code}, PE={trade.pe_scrip_code}, FUT={trade.futures_scrip_code}")
+        f"{tag} start (reason={reason}, order CE->FUT->PE). lot_size={lot_size}, legs: "
+        f"CE={trade.ce_scrip_code}, FUT={trade.futures_scrip_code}, PE={trade.pe_scrip_code}")
 
     square_offs = [
         (trade.ce_scrip_code, "B", "CE"),
-        (trade.pe_scrip_code, "S", "PE"),
         (trade.futures_scrip_code, "S", "FUT"),
+        (trade.pe_scrip_code, "S", "PE"),
     ]
     legs = [(str(code), side, leg) for code, side, leg in square_offs if code]
     if not legs:
@@ -1857,3 +1857,4 @@ def safety_check(trigger: str = "3:40 PM"):
         return len(open_trades)
     finally:
         db.close()
+
