@@ -1691,3 +1691,76 @@ def test_set_real_pnl_rejects_non_number():
         assert e.status_code == 400
     finally:
         db.close()
+
+
+def test_edit_single_trade_pnl_resyncs_total():
+    """Editing one closed trade's P&L must move the headline total by the same delta."""
+    from routes.dashboard import get_total_pnl, set_trade_pnl
+    a = make_open_trade(name="INFY"); a.status = "closed"; a.pnl = 1000.0
+    b = make_open_trade(name="SBIN"); b.status = "closed"; b.pnl = 500.0
+    add(make_settings(), a, b)
+
+    db = TestSession()
+    assert get_total_pnl(db)["real_pnl"] == 1500.0
+
+    # client lowers trade A from 1000 -> 400 (broker net after charges)
+    aid = db.query(Trade).filter(Trade.stock_name == "INFY").first().id
+    res = set_trade_pnl(aid, {"pnl": 400.0}, db)
+    assert res["success"] and res["pnl"] == 400.0
+    after = get_total_pnl(db)
+    assert after["real_pnl"] == 900.0          # 400 + 500 — total re-synced
+    assert after["real_pnl_computed"] == 900.0
+    db.close()
+
+
+def test_edit_trade_pnl_coexists_with_manual_adjustment():
+    """A per-trade edit and the headline offset both apply (offset sits on top)."""
+    from routes.dashboard import get_total_pnl, set_real_pnl, set_trade_pnl
+    a = make_open_trade(name="INFY"); a.status = "closed"; a.pnl = 1000.0
+    add(make_settings(), a)
+
+    db = TestSession()
+    set_real_pnl({"target": 900.0}, db)        # offset = -100
+    aid = db.query(Trade).filter(Trade.stock_name == "INFY").first().id
+    set_trade_pnl(aid, {"pnl": 1200.0}, db)     # sum now 1200
+    after = get_total_pnl(db)
+    assert after["real_pnl_computed"] == 1200.0
+    assert after["manual_pnl_adjustment"] == -100.0
+    assert after["real_pnl"] == 1100.0          # 1200 + (-100)
+    db.close()
+
+
+def test_edit_paper_trade_pnl_leaves_real_total_untouched():
+    from routes.dashboard import get_total_pnl, set_trade_pnl
+    real = make_open_trade(name="INFY"); real.status = "closed"; real.pnl = 1000.0
+    paper = make_open_trade(name="RELIANCE"); paper.status = "closed"; paper.pnl = 500.0
+    paper.is_paper_trade = True
+    add(make_settings(), real, paper)
+
+    db = TestSession()
+    pid = db.query(Trade).filter(Trade.stock_name == "RELIANCE").first().id
+    set_trade_pnl(pid, {"pnl": 50.0}, db)
+    after = get_total_pnl(db)
+    assert after["real_pnl"] == 1000.0          # real total untouched
+    assert after["paper_pnl"] == 50.0           # paper total re-synced
+    db.close()
+
+
+def test_set_trade_pnl_rejects_non_number_and_missing_trade():
+    from routes.dashboard import set_trade_pnl
+    from fastapi import HTTPException
+    t = make_open_trade(name="INFY"); t.status = "closed"; t.pnl = 100.0
+    add(make_settings(), t)
+    db = TestSession()
+    tid = db.query(Trade).filter(Trade.stock_name == "INFY").first().id
+    try:
+        set_trade_pnl(tid, {"pnl": "abc"}, db)
+        assert False, "should have raised for a non-number pnl"
+    except HTTPException as e:
+        assert e.status_code == 400
+    try:
+        set_trade_pnl(999999, {"pnl": 5.0}, db)
+        assert False, "should have raised for a missing trade"
+    except HTTPException as e:
+        assert e.status_code == 404
+    db.close()

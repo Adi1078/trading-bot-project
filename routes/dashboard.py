@@ -136,6 +136,38 @@ def get_trade_history(db: Session = Depends(get_db)):
     return {"trades": [_trade_to_dict(t) for t in trades]}
 
 
+@router.post("/set-trade-pnl/{trade_id}")
+def set_trade_pnl(trade_id: int, payload: dict, db: Session = Depends(get_db)):
+    """
+    Manually override a single closed trade's recorded P&L. Because the headline
+    total is re-summed from every trade's `pnl` on each read, editing one trade here
+    automatically re-syncs the total (real total for real trades, paper total for
+    paper trades) — no separate adjustment needed. The `manual_pnl_adjustment`
+    offset, if the client set one, still applies on top of the new sum.
+    """
+    try:
+        new_pnl = round(float(payload.get("pnl")), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="pnl must be a number")
+
+    trade = db.query(Trade).filter(Trade.id == trade_id).first()
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if trade.status != "closed":
+        return {"success": False, "error": "Only closed trades can be edited"}
+
+    old_pnl = trade.pnl
+    trade.pnl = new_pnl
+
+    kind = "paper" if trade.is_paper_trade else "real"
+    log = Log(level="INFO",
+              message=f"Trade #{trade.id} ({trade.stock_name}, {kind}) P&L manually "
+                      f"edited {old_pnl} -> {new_pnl}")
+    db.add(log)
+    db.commit()
+    return {"success": True, "id": trade.id, "pnl": new_pnl}
+
+
 @router.post("/close-trade/{trade_id}")
 def close_trade(trade_id: int, db: Session = Depends(get_db)):
     """Manually close a trade from the dashboard."""

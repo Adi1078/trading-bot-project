@@ -167,7 +167,7 @@ async function loadTradeHistory() {
     const tbody = document.getElementById("tradeHistoryBody");
 
     if (!data.trades || data.trades.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" class="empty-state">No closed trades</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="empty-state">No closed trades</td></tr>`;
         return;
     }
 
@@ -190,8 +190,28 @@ async function loadTradeHistory() {
             <td class="${pnlClass}">${pnlText}</td>
             <td>${formatDate(t.placed_at)}</td>
             <td>${formatDate(t.closed_at)}</td>
+            <td><a onclick="editTradePnl(${t.id}, ${pnl === null ? 0 : pnl})" title="Edit this trade's P&L"
+                   style="cursor:pointer;font-size:0.85em;text-decoration:underline;">✎ edit</a></td>
         </tr>`;
     }).join("");
+}
+
+async function editTradePnl(id, current) {
+    const input = prompt("Edit this trade's P&L (₹). The total P&L will update to match:", current);
+    if (input === null) return;  // cancelled
+    const pnl = parseFloat(input);
+    if (isNaN(pnl)) { showToast("Please enter a valid number", "error"); return; }
+    const data = await api(`/api/dashboard/set-trade-pnl/${id}`, {
+        method: "POST",
+        body: JSON.stringify({ pnl })
+    });
+    if (data && data.success) {
+        showToast("Trade P&L updated", "success");
+        loadTradeHistory();
+        loadPnl();
+    } else {
+        showToast((data && (data.error || data.detail)) || "Could not update trade P&L", "error");
+    }
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
