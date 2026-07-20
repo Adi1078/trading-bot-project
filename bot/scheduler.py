@@ -229,7 +229,10 @@ def _run_loop():
 
             # ── Chartink screener scan every 5 minutes (runs in background so it
             #    never blocks the monitor loop). run_chartink_cycle has its own guards. ──
-            if last_chartink_scan is None or (now - last_chartink_scan).seconds >= 300:
+            #    Gated by the same entry time as fixed trades: no Chartink trades fire
+            #    before trade_start_time. (Manual "Run Chartink now" still bypasses this.)
+            if _past_entry_time(now, trade_start) and (
+                last_chartink_scan is None or (now - last_chartink_scan).seconds >= 300):
                 try:
                     from bot.trade_manager import run_chartink_cycle
                     threading.Thread(target=run_chartink_cycle, daemon=True).start()

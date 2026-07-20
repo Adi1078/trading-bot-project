@@ -1764,3 +1764,19 @@ def test_set_trade_pnl_rejects_non_number_and_missing_trade():
     except HTTPException as e:
         assert e.status_code == 404
     db.close()
+
+
+def test_chartink_gated_by_trade_start_time():
+    """The scheduler starts Chartink scans only once the clock reaches
+    trade_start_time — the same gate used for fixed trades."""
+    from bot.scheduler import _past_entry_time
+    base = datetime(2026, 7, 20, 0, 0, 0)
+    start = "10:00"
+    # Before the entry time -> gate closed (no Chartink scan/trade)
+    assert _past_entry_time(base.replace(hour=9, minute=59), start) is False
+    # Exactly at the entry time -> gate opens
+    assert _past_entry_time(base.replace(hour=10, minute=0), start) is True
+    # After the entry time -> stays open
+    assert _past_entry_time(base.replace(hour=14, minute=30), start) is True
+    # Bad time string fails safe (gate closed, no crash)
+    assert _past_entry_time(base, "not-a-time") is False
