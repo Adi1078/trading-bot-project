@@ -39,12 +39,20 @@ async function runFixedTradeNow(tradeId, stockName) {
     if (!confirm(`Run the fixed trade for ${stockName} now? This places the live order immediately.`)) return;
     const btn = document.getElementById(`runFt-${tradeId}`);
     if (btn) { btn.disabled = true; btn.textContent = "Running..."; }
-    const data = await api(`/api/fixed-trades/run/${tradeId}`, { method: "POST" });
-    if (btn) { btn.disabled = false; btn.textContent = "Run Now"; }
-    if (data.success) {
-        showToast(data.message, "success");
-    } else {
-        showToast(data.error, "error");
+    // The button MUST always come back, even if the request itself blows up
+    // (dropped connection, session expired, non-JSON reply). Without this the
+    // button stuck on "Running..." forever and swallowed the real error.
+    try {
+        const data = await api(`/api/fixed-trades/run/${tradeId}`, { method: "POST" });
+        if (data && data.success) {
+            showToast(data.message || `${stockName} triggered — check logs`, "success");
+        } else {
+            showToast((data && (data.error || data.detail)) || "Run failed — check logs", "error");
+        }
+    } catch (e) {
+        showToast(`Could not reach the server: ${e.message || e}`, "error");
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "Run Now"; }
     }
 }
 
