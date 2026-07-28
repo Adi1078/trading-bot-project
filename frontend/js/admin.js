@@ -434,7 +434,9 @@ async function loadFixedTrades() {
             <td>${t.lot_size || 1}</td>
             <td style="color:#2ecc71;">₹${t.profit_target}</td>
             <td style="color:#e74c3c;">₹${t.loss_limit}</td>
-            <td>${t.month_type === "option" ? "Naked CE Sell" : t.month_type}</td>
+            <td>${t.month_type === "option"
+                    ? `Naked CE Sell <span style="color:#8b949e;">(${t.option_expiry || "current"})</span>`
+                    : t.month_type}</td>
             <td>
                 <span class="badge ${t.is_trade ? 'badge-open' : 'badge-paper'}">
                     ${t.is_trade ? "Yes" : "Paper"}
@@ -451,13 +453,10 @@ async function loadFixedTrades() {
     `).join("");
 }
 
-// When "Naked CE Sell" is chosen, Month is irrelevant (naked CE uses current
-// expiry), so disable it to avoid confusion.
+// Month applies to BOTH trade types: for Collar it's the futures/option month,
+// for Naked CE Sell it's the CE expiry month (stored separately as option_expiry).
 function onFtTradeTypeChange() {
-    const isOption = document.getElementById("ftTradeType").value === "option";
-    const month = document.getElementById("ftMonthType");
-    month.disabled = isOption;
-    if (isOption) month.value = "current";
+    document.getElementById("ftMonthType").disabled = false;
 }
 
 // Resets the inline Add/Edit form back to "add" mode (no API call).
@@ -490,10 +489,11 @@ function editFixedTrade(trade) {
     document.getElementById("ftLotSize").value = trade.lot_size || 1;
     document.getElementById("ftIsTrade").value = String(trade.is_trade);
     // Backend stores one field (month_type) that can be current/next/option.
-    // Split it back into the two UI dropdowns.
+    // Split it back into the two UI dropdowns. For naked CE the month lives in
+    // its own field (option_expiry) because month_type is spent on "option".
     if (trade.month_type === "option") {
         document.getElementById("ftTradeType").value = "option";
-        document.getElementById("ftMonthType").value = "current";
+        document.getElementById("ftMonthType").value = trade.option_expiry || "current";
     } else {
         document.getElementById("ftTradeType").value = "collar";
         document.getElementById("ftMonthType").value = trade.month_type;
@@ -513,6 +513,9 @@ async function saveFixedTrade() {
     const monthType = (tradeType === "option") ? "option" : month;
 
     const body = {
+        // For naked CE the chosen month rides in its own field, since month_type
+        // is taken by the literal value "option".
+        option_expiry: month,
         stock_name: document.getElementById("ftStockName").value.trim().toUpperCase(),
         scrip_code: null,
         strike_type: document.getElementById("ftStrikeType").value,

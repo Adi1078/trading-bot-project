@@ -804,8 +804,12 @@ def _place_option_trade(db, settings, ft: FixedTrade):
     Supports BOTH fixed strike and percent (X% above live spot) — the same strike
     logic as the collar/screener paths. (Previously this path ignored strike_type
     and always treated the value as a literal strike, so "percent" silently broke.)
+
+    Expiry comes from ft.option_expiry ("current" | "next"). month_type is already
+    spent on the value "option", so the naked-CE month lives in its own field.
+    Older rows have no value -> default to current month (previous behaviour).
     """
-    expiry = get_current_expiry()
+    expiry = _get_expiry(getattr(ft, "option_expiry", None) or "current")
 
     # Compute the CE strike. "fixed" uses the value directly; "percent" needs the
     # live spot price (X% above spot), so fetch it first.

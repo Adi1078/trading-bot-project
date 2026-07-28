@@ -58,12 +58,13 @@ def make_watchlist(name="INFY", code="1660"):
 
 
 def make_fixed_trade(name="INFY", strike_type="percent", strike_value=2,
-                     month_type="current", is_trade=True):
+                     month_type="current", is_trade=True, option_expiry="current"):
     return FixedTrade(
         stock_name=name, scrip_code="1660",
         strike_type=strike_type, strike_value=strike_value,
         profit_target=20, loss_limit=25,
         month_type=month_type, is_trade=is_trade, is_active=True,
+        option_expiry=option_expiry,
     )
 
 
@@ -827,6 +828,51 @@ def test_naked_ce_percent_strike_places_limit_order(mock_broker):
     trade = db.query(Trade).first()
     db.close()
     assert trade is not None and trade.status == "open" and trade.month_type == "option"
+
+
+# ── Naked CE expiry selection: current vs next month ─────────────────────────
+
+def _run_naked_ce_and_capture_expiry(mock_broker, option_expiry):
+    """Fire a naked-CE fixed trade and return the expiry passed to get_option_chain."""
+    add(make_settings(), make_watchlist(),
+        make_fixed_trade(strike_type="percent", strike_value=3, month_type="option",
+                         option_expiry=option_expiry))
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1160)
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.place_order.return_value = order_ok(555)
+    mock_broker.get_order_status.return_value = fill_ok()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            trade_manager.run_fixed_trades()
+
+    assert mock_broker.get_option_chain.called, "option chain should have been requested"
+    return mock_broker.get_option_chain.call_args[0][2]   # 3rd positional arg = expiry
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_uses_current_expiry_when_selected(mock_broker):
+    from utils.exchange_calendar import get_current_expiry
+    expiry = _run_naked_ce_and_capture_expiry(mock_broker, "current")
+    assert expiry == get_current_expiry()
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_uses_next_expiry_when_selected(mock_broker):
+    """The regression this feature fixes: naked CE was hardcoded to current month."""
+    from utils.exchange_calendar import get_current_expiry, get_next_expiry
+    expiry = _run_naked_ce_and_capture_expiry(mock_broker, "next")
+    assert expiry == get_next_expiry()
+    assert expiry != get_current_expiry(), "next-month expiry must differ from current"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_naked_ce_defaults_to_current_when_option_expiry_missing(mock_broker):
+    """Rows created before this feature have no option_expiry -> current month."""
+    from utils.exchange_calendar import get_current_expiry
+    expiry = _run_naked_ce_and_capture_expiry(mock_broker, None)
+    assert expiry == get_current_expiry()
 
 
 # ── Partial fill: no square-off, email the client ─────────────────────────────

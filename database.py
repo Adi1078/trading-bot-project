@@ -40,6 +40,9 @@ def _ensure_columns():
             "ui_session_secret": "VARCHAR",
             "manual_pnl_adjustment": "FLOAT DEFAULT 0",
         },
+        "fixed_trades": {
+            "option_expiry": "VARCHAR DEFAULT 'current'",
+        },
         "trades": {
             "expiry_date": "VARCHAR",
             "squareoff_attempts": "INTEGER DEFAULT 0",

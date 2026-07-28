@@ -17,6 +17,7 @@ class FixedTradeRequest(BaseModel):
     profit_target: float
     loss_limit: float
     month_type: str         # "current", "next", "option"
+    option_expiry: str = "current"   # naked-CE expiry: "current" | "next"
     lot_size: int = 1
     is_trade: bool = True
 
@@ -39,6 +40,7 @@ def add_fixed_trade(request: FixedTradeRequest, db: Session = Depends(get_db)):
         profit_target=request.profit_target,
         loss_limit=request.loss_limit,
         month_type=request.month_type,
+        option_expiry=(request.option_expiry if request.option_expiry in ("current", "next") else "current"),
         lot_size=request.lot_size,
         is_trade=request.is_trade
     )
@@ -65,6 +67,7 @@ def edit_fixed_trade(trade_id: int, request: FixedTradeRequest, db: Session = De
     trade.profit_target = request.profit_target
     trade.loss_limit = request.loss_limit
     trade.month_type = request.month_type
+    trade.option_expiry = (request.option_expiry if request.option_expiry in ("current", "next") else "current")
     trade.lot_size = request.lot_size
     trade.is_trade = request.is_trade
 
@@ -157,6 +160,7 @@ def _fixed_trade_to_dict(trade: FixedTrade):
         "profit_target": trade.profit_target,
         "loss_limit": trade.loss_limit,
         "month_type": trade.month_type,
+        "option_expiry": trade.option_expiry or "current",
         "lot_size": trade.lot_size or 1,
         "is_trade": trade.is_trade,
         "created_at": str(trade.created_at)
