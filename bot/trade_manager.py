@@ -27,6 +27,17 @@ LIMIT_ORDER_BUFFER_CHEAP = 0.01      # 1%  for LTP <= ₹100
 LIMIT_ORDER_BUFFER = 0.005           # 0.5% for LTP >  ₹100
 CHEAP_PRICE_THRESHOLD = 100
 
+# Buying back a SHORT option is the urgent leg of a square-off: until it is closed
+# the position still carries the open risk, and every second we fail to fill the
+# price can run away (a real case: a CE ran 79.9 -> 90.35 in five seconds while a
+# too-tight order sat unfilled, so we cancelled and bought 3 points higher).
+#
+# A LIMIT PRICE IS A CAP, NOT THE PRICE PAID — the order still fills at the best
+# levels first. Observed live: an order capped at 85.85 filled at an average of
+# 83.55. So a wider cap does not make us pay more in a normal book; it only buys
+# certainty of filling. Hence a deliberately generous buffer on this one leg.
+LIMIT_ORDER_BUFFER_URGENT = 0.03     # 3% when closing a short position
+
 # After placing the exit (square-off) orders we wait this long before re-reading the
 # broker's net positions, so the exchange has time to fill the marketable-limit
 # orders. We trust the *position* read (not the "order accepted" reply) as the
@@ -69,13 +80,17 @@ def _parse_close_time(value):
         return 12, 0
 
 
-def _marketable_limit_price(ltp, side, scrip_code=None):
+def _marketable_limit_price(ltp, side, scrip_code=None, urgent=False):
     """
     Limit price that behaves like a market order but caps slippage.
     Buy ("B"): a buffer above LTP; Sell ("S"): a buffer below. Rounded to the
     instrument's own exchange tick (looked up by scrip_code) so the price is never
     off the tick grid — futures often use 0.1/0.2/... not 0.05.
     Falls back to 0 (market) only if LTP is unavailable.
+
+    `urgent=True` (buying back a short leg) widens the buffer: the limit is only a
+    CAP, so the order still fills at the best available levels — a wider cap buys
+    fill-certainty rather than a worse price.
 
     Defensive: if the tick can't be resolved (no scrip_code, scrip master
     unavailable, or a non-numeric value) it falls back to 0.05 — i.e. the previous
@@ -95,7 +110,10 @@ def _marketable_limit_price(ltp, side, scrip_code=None):
                 tick = t
         except (TypeError, ValueError):
             tick = 0.05
-    buffer = LIMIT_ORDER_BUFFER_CHEAP if ltp <= CHEAP_PRICE_THRESHOLD else LIMIT_ORDER_BUFFER
+    if urgent:
+        buffer = LIMIT_ORDER_BUFFER_URGENT
+    else:
+        buffer = LIMIT_ORDER_BUFFER_CHEAP if ltp <= CHEAP_PRICE_THRESHOLD else LIMIT_ORDER_BUFFER
     factor = (1 + buffer) if side == "B" else (1 - buffer)
     return _round_tick(ltp * factor, tick)
 
@@ -142,18 +160,94 @@ def _depth_touch(db, settings, scrip_code, side, leg=""):
         return None
 
 
-def _order_price(db, settings, scrip_code, side, ltp, leg=""):
+def _sweep_limit_price(db, settings, scrip_code, side, qty, leg=""):
+    """
+    The price at which our FULL quantity can trade right now.
+
+    _depth_touch() only reports the best bid/ask, but that level may hold far less
+    than we need — an order priced there can fill nothing at all if the market ticks
+    away. This walks the live level-5 book from the best level outward, consuming
+    quantity, and returns the WORST level it had to reach to cover `qty`.
+
+    Used as a LIMIT (a cap, not the price paid), so the order still fills at the
+    better levels first — it just guarantees the whole size can clear instead of
+    resting unfilled and forcing us to chase.
+
+        SELL ("S") -> consume BIDS (flag 66), best = highest first
+        BUY  ("B") -> consume ASKS (flag 83), best = lowest first
+
+    Returns a price > 0, or None when depth is unusable (caller falls back to the
+    touch, then to the LTP). Never raises.
+    """
+    if not scrip_code or not qty or qty <= 0:
+        return None
+    tag = f"[SWEEP {leg} {scrip_code} {side}]"
+    try:
+        res = fivepaisa.get_market_depth(
+            settings.access_token, settings.client_code, "N", "D", scrip_code)
+        if not res.get("success"):
+            return None
+        want = 66 if side == "S" else 83
+        levels = []
+        for d in (res.get("depth") or []):
+            try:
+                flag = int(float(d.get("BbBuySellFlag", 0)))
+                q = float(d.get("Quantity") or 0)
+                p = float(d.get("Price") or 0)
+            except (ValueError, TypeError):
+                continue
+            if flag == want and q > 0 and p > 0:
+                levels.append((p, q))
+        if not levels:
+            return None
+
+        levels.sort(key=lambda x: x[0], reverse=(side == "S"))   # best price first
+        remaining = float(qty)
+        worst = levels[0][0]
+        for price, available in levels:
+            worst = price
+            remaining -= available
+            if remaining <= 0:
+                break
+
+        if remaining > 0:
+            # The visible book cannot cover the full size. Still return the deepest
+            # level we can see — combined with the buffer it reaches further than
+            # the touch — but say so, because a thin book is itself a warning.
+            _save_log(db, "INFO",
+                f"{tag} visible book covers only {qty - remaining:.0f}/{qty:.0f} — "
+                f"pricing to the deepest visible level {worst}")
+        else:
+            _save_log(db, "INFO", f"{tag} clearing price for {qty:.0f} = {worst}")
+        return worst
+    except Exception as e:
+        _save_log(db, "WARNING", f"{tag} sweep pricing failed, falling back - {_exc_detail(e)}")
+        return None
+
+
+def _order_price(db, settings, scrip_code, side, ltp, leg="", qty=None, urgent=False):
     """
     Marketable limit price anchored to the LIVE order book so the order crosses the
-    spread and fills, instead of resting "away" on a stale LTP. Uses the best
-    bid/ask (MarketDepth) as the anchor when available, else the passed LTP, then
-    applies the standard marketable buffer + the instrument's tick. Never raises —
-    falls back to the LTP-based price on any problem (no regression vs before).
+    spread and fills, instead of resting "away" on a stale LTP.
+
+    Anchor priority (each falls back to the next, so this can never be worse than
+    the old behaviour):
+      1. SWEEP price — the level that clears our FULL `qty`. The best bid/ask alone
+         may hold far less size than we need, and an order priced there can fill
+         NOTHING and leave us chasing the market.
+      2. The best bid/ask touch.
+      3. The passed LTP.
+
+    Then the marketable buffer + the instrument's tick are applied. Never raises.
     """
-    anchor = _depth_touch(db, settings, scrip_code, side, leg)
+    anchor = None
+    if qty:
+        anchor = _sweep_limit_price(db, settings, scrip_code, side, qty, leg)
+    if not anchor or anchor <= 0:
+        anchor = _depth_touch(db, settings, scrip_code, side, leg)
     if not anchor or anchor <= 0:
         anchor = ltp
-    return _marketable_limit_price(anchor, side, scrip_code)
+    return _marketable_limit_price(anchor, side, scrip_code, urgent=urgent)
 
 
 def _leg_ltp(db, settings, scrip_code, leg=""):
@@ -1486,9 +1580,26 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
 
     quotes = {str(q["ScripCode"]): q["LastRate"] for q in quote_result["quotes"]}
 
-    current_futures = quotes.get(str(trade.futures_scrip_code), trade.futures_entry_price)
-    current_ce = quotes.get(str(trade.ce_scrip_code), trade.ce_entry_price)
-    current_pe = quotes.get(str(trade.pe_scrip_code), trade.pe_entry_price)
+    # A missing quote must NEVER fall back to the leg's ENTRY price. Doing so makes
+    # that leg contribute exactly ZERO to the P&L — silently deleting it from the
+    # calculation. On a rally the short CE is the leg that is LOSING, so dropping it
+    # leaves a futures-only number that looks like a large profit and fires the
+    # target on money that does not exist. If we cannot price every open leg we
+    # cannot value the position at all, so skip this cycle and re-check next time.
+    open_legs = [(name, code) for name, code in (
+        ("FUT", trade.futures_scrip_code),
+        ("CE", trade.ce_scrip_code),
+        ("PE", trade.pe_scrip_code)) if code]
+    missing = [name for name, code in open_legs if str(code) not in quotes]
+    if missing:
+        _save_log(db, "WARNING",
+            f"[MONITOR {trade.stock_name} #{trade.id}] no live quote for {missing} "
+            f"(got {sorted(quotes)}) - cannot value the position, skipping this cycle")
+        return
+
+    current_futures = quotes.get(str(trade.futures_scrip_code)) if trade.futures_scrip_code else None
+    current_ce = quotes.get(str(trade.ce_scrip_code)) if trade.ce_scrip_code else None
+    current_pe = quotes.get(str(trade.pe_scrip_code)) if trade.pe_scrip_code else None
 
     current_pnl = calculate_trade_pnl(
         trade.futures_entry_price, current_futures,
@@ -1496,6 +1607,16 @@ def _check_and_close_if_needed(db, settings, trade: Trade):
         trade.pe_entry_price, current_pe,
         lot_size=trade.lot_size or 1
     )
+
+    # Record the exact prices behind every exit decision. Without this a wrong
+    # trigger cannot be diagnosed after the fact — which is why the ASIANPAINT
+    # close could not be explained from the logs alone.
+    if current_pnl >= trade.profit_target or current_pnl <= -trade.loss_limit:
+        _save_log(db, "INFO",
+            f"[MONITOR {trade.stock_name} #{trade.id}] P&L {current_pnl} from "
+            f"FUT {trade.futures_entry_price}->{current_futures}, "
+            f"CE {trade.ce_entry_price}->{current_ce}, "
+            f"PE {trade.pe_entry_price}->{current_pe}, lot {trade.lot_size}")
 
     if current_pnl >= trade.profit_target:
         _save_log(db, "INFO",
@@ -1614,7 +1735,11 @@ def _square_off_one_leg(db, settings, trade, scrip_code, side, leg, lot_size):
 
         # 3. Place a fresh marketable exit order.
         ltp = _leg_ltp(db, settings, scrip_code, leg)
-        price = _order_price(db, settings, scrip_code, side, ltp, leg)
+        # Price to CLEAR the whole lot, and treat buying back a short leg as urgent:
+        # that leg still carries the open risk until it is flat, and a too-tight
+        # limit that fills nothing just means chasing the price on the next attempt.
+        price = _order_price(db, settings, scrip_code, side, ltp, leg,
+                             qty=lot_size, urgent=(side == "B"))
         if price == 0:
             _save_log(db, "ERROR", f"{leg_tag} no valid exit price (ltp={ltp}) - skipping this attempt")
             continue

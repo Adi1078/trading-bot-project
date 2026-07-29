@@ -977,6 +977,147 @@ def test_unexpected_error_logs_full_traceback(mock_broker):
     assert "Traceback (most recent call last)" in err.message  # the traceback
 
 
+# ── A missing quote must never be treated as "no change" ─────────────────────
+#
+# Regression for ASIANPAINT #147 (2026-07-29): the monitor reported "PROFIT target
+# hit: P&L 6575 >= 5000" and the trade closed at a REALISED LOSS of -362.5. 6575 is
+# exactly the futures leg on its own (26.30 x 250), i.e. the two option legs
+# contributed zero — which is what the old
+#     quotes.get(code, trade.ce_entry_price)
+# fallback produces when a quote is absent: the leg is priced at its own entry, so
+# (entry - entry) = 0 and the LOSING short CE silently vanishes from the total.
+
+@patch("bot.trade_manager.fivepaisa")
+def test_missing_leg_quote_does_not_fire_a_false_profit_target(mock_broker):
+    """The whole ASIANPAINT setup: only the futures leg is quoted."""
+    trade = make_open_trade(profit_target=5000, loss_limit=12000)
+    trade.futures_entry_price, trade.ce_entry_price, trade.pe_entry_price = 2742.2, 64.3, 57.45
+    trade.lot_size = 250
+    add(make_settings(), trade)
+
+    # Futures up 26.3 -> futures alone is +6575, which USED to look like a target hit.
+    mock_broker.get_market_quote.return_value = {
+        "success": True,
+        "quotes": [{"ScripCode": "INFY_FUT", "LastRate": 2768.5}],   # CE and PE absent
+    }
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    still_open = db.query(Trade).filter(Trade.status == "open").count()
+    db.close()
+    assert still_open == 1, "must NOT close on a P&L computed from a partial quote set"
+    assert not mock_broker.place_order.called, "no square-off may be attempted"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_full_quote_set_still_closes_normally(mock_broker):
+    """With every leg priced, a genuine target still fires (no regression)."""
+    trade = make_open_trade(profit_target=5000, loss_limit=12000)
+    trade.futures_entry_price, trade.ce_entry_price, trade.pe_entry_price = 2742.2, 64.3, 57.45
+    trade.lot_size = 250
+    add(make_settings(), trade)
+
+    # FUT +40, CE unchanged, PE unchanged -> a real +10000
+    mock_broker.get_market_quote.return_value = {
+        "success": True,
+        "quotes": [
+            {"ScripCode": "INFY_FUT", "LastRate": 2782.2},
+            {"ScripCode": "INFY_CE_1150", "LastRate": 64.3},
+            {"ScripCode": "INFY_PE_1100", "LastRate": 57.45},
+        ],
+    }
+    mock_broker.get_positions.return_value = {"success": True, "positions": []}
+    mock_broker.place_order.return_value = order_ok(1)
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_closed_email"):
+            trade_manager.monitor_open_trades()
+
+    db = TestSession()
+    closed = db.query(Trade).filter(Trade.status == "closed").count()
+    db.close()
+    assert closed == 1, "a genuine target with all legs priced must still close"
+
+
+# ── Exit-order pricing: clear the whole lot, don't tickle the touch ───────────
+#
+# Regression for a real loss (ASIANPAINT #147, 2026-07-29). The broker order book
+# showed the first buy-back priced at 81.65 filling ZERO (TradedQty 0, cancelled),
+# then a second at 85.85 filling everything at an average of 83.55. The tight first
+# order never reached the market, and in the 4 seconds spent chasing, the CE ran
+# from ~80 to ~90 — turning a "profit hit" into a booked loss.
+
+def _depth_book(bids, asks):
+    """Build a MarketDepth reply: bids flag 66, asks flag 83."""
+    rows = [{"BbBuySellFlag": 66, "Price": p, "Quantity": q} for p, q in bids]
+    rows += [{"BbBuySellFlag": 83, "Price": p, "Quantity": q} for p, q in asks]
+    return {"success": True, "depth": rows}
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_sweep_price_clears_the_full_quantity_not_just_the_touch(mock_broker):
+    """
+    The best ask holds only 25 of the 250 we need. Pricing at the touch would leave
+    225 unfilled, so the anchor must reach the level that actually clears the lot.
+    """
+    from bot.trade_manager import _sweep_limit_price
+    mock_broker.get_market_depth.return_value = _depth_book(
+        bids=[(79.0, 500)],
+        asks=[(80.0, 25), (81.0, 100), (83.0, 400)])
+    add(make_settings())
+    db = TestSession()
+    price = _sweep_limit_price(db, TestSession().query(Settings).first(), "85342", "B", 250, "CE")
+    db.close()
+    assert price == 83.0, f"must reach the level that clears 250, got {price}"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_sweep_price_for_a_sell_walks_down_the_bids(mock_broker):
+    from bot.trade_manager import _sweep_limit_price
+    mock_broker.get_market_depth.return_value = _depth_book(
+        bids=[(2772.0, 50), (2770.0, 100), (2766.0, 300)],
+        asks=[(2775.0, 500)])
+    add(make_settings())
+    db = TestSession()
+    price = _sweep_limit_price(db, TestSession().query(Settings).first(), "58107", "S", 250, "FUT")
+    db.close()
+    assert price == 2766.0
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_short_buyback_uses_the_urgent_buffer_so_it_actually_fills(mock_broker):
+    """
+    Replay of the ASIANPAINT numbers: with the old 1% buffer the order priced at
+    ~81.65 and filled nothing. Pricing to clear the lot with the urgent buffer must
+    land ABOVE the level the market actually traded at (83.55) so it fills at once.
+    """
+    from bot.trade_manager import _order_price
+    mock_broker.get_market_depth.return_value = _depth_book(
+        bids=[(79.5, 500)],
+        asks=[(80.85, 25), (82.0, 75), (83.6, 400)])
+    mock_broker.get_tick_size.return_value = 0.05
+    add(make_settings())
+    db = TestSession()
+    s = TestSession().query(Settings).first()
+
+    tight = _order_price(db, s, "85342", "B", 79.9, "CE")                       # old behaviour
+    swept = _order_price(db, s, "85342", "B", 79.9, "CE", qty=250, urgent=True)  # new
+    db.close()
+
+    assert tight < 83.55, "the old touch-based price is why the order filled nothing"
+    assert swept > 83.55, f"must clear the real trading level, got {swept}"
+
+
+def test_urgent_buffer_only_widens_the_cap_never_the_sell_side():
+    """A wider cap buys fill-certainty on a buy-back; sells stay conservative."""
+    mlp = trade_manager._marketable_limit_price
+    assert mlp(80, "B", None, urgent=True) > mlp(80, "B")     # buy reaches higher
+    assert mlp(80, "S", None, urgent=True) < mlp(80, "S")     # sell reaches lower
+    assert mlp(0, "B", None, urgent=True) == 0                # still safe on bad input
+
+
 # ── Marketable Limit Price (tiered buffer) ────────────────────────────────────
 
 def test_marketable_limit_price_tiered_buffer():
