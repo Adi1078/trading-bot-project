@@ -555,6 +555,68 @@ def _pick_liquid_pe(db, settings, stock_name, option_chain, ce_premium, max_chec
     return None, None, None
 
 
+def _place_collar_legs(db, settings, stock_name, lot_size,
+                       futures_scrip_code, futures_price,
+                       ce_scrip_code, ce_premium,
+                       pe_scrip_code, pe_premium):
+    """
+    Place the three collar legs in the order the client requires:
+
+        1. CE       (the SHORT leg — the one carrying the risk)
+        2. Futures
+        3. PE       ONLY if at least one of CE / Futures was accepted
+
+    Why the PE is conditional: the PE is protection. If neither the CE short nor the
+    futures position opened, there is nothing to protect, and buying a PE would just
+    pay premium for a hedge against a position that does not exist. If either one
+    DID open, the PE is placed as normal.
+
+    "Accepted" here is the broker's RMS response to place_order. The real exchange
+    fill is confirmed separately by _finalize_live_collar (accepted != filled).
+
+    Returns the `legs` list in the shape _finalize_live_collar expects.
+    """
+    ce_remote = generate_remote_order_id(stock_name + "_CE")
+    ce_result = fivepaisa.place_order(
+        settings.access_token, "N", "D", ce_scrip_code, "S",
+        _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"),
+        lot_size, False, ce_remote)
+    _save_log(db, "INFO",
+              f"{stock_name}: [1/3 CE] {'accepted' if ce_result.get('success') else 'REJECTED - ' + str(ce_result.get('error'))}")
+
+    fut_remote = generate_remote_order_id(stock_name + "_FUT")
+    futures_result = fivepaisa.place_order(
+        settings.access_token, "N", "D", futures_scrip_code, "B",
+        _order_price(db, settings, futures_scrip_code, "B", futures_price, "FUT"),
+        lot_size, False, fut_remote)
+    _save_log(db, "INFO",
+              f"{stock_name}: [2/3 FUT] {'accepted' if futures_result.get('success') else 'REJECTED - ' + str(futures_result.get('error'))}")
+
+    pe_remote = generate_remote_order_id(stock_name + "_PE")
+    if ce_result.get("success") or futures_result.get("success"):
+        pe_result = fivepaisa.place_order(
+            settings.access_token, "N", "D", pe_scrip_code, "B",
+            _order_price(db, settings, pe_scrip_code, "B", pe_premium, "PE"),
+            lot_size, False, pe_remote)
+        _save_log(db, "INFO",
+                  f"{stock_name}: [3/3 PE] {'accepted' if pe_result.get('success') else 'REJECTED - ' + str(pe_result.get('error'))}")
+    else:
+        pe_result = {"success": False,
+                     "error": "skipped - neither CE nor Futures was accepted, so there is nothing to hedge"}
+        _save_log(db, "WARNING",
+                  f"{stock_name}: [3/3 PE] SKIPPED - both CE and Futures were rejected, "
+                  f"no position to hedge")
+
+    return [
+        {"name": "FUT", "side": "B", "scrip": futures_scrip_code, "entry": futures_price,
+         "result": futures_result, "remote": fut_remote},
+        {"name": "CE",  "side": "S", "scrip": ce_scrip_code,      "entry": ce_premium,
+         "result": ce_result,      "remote": ce_remote},
+        {"name": "PE",  "side": "B", "scrip": pe_scrip_code,      "entry": pe_premium,
+         "result": pe_result,      "remote": pe_remote},
+    ]
+
+
 def _finalize_live_collar(db, settings, *, stock_name, trade_source, fixed_trade_id,
                           month_type, lot_size, expiry_date, profit_target, loss_limit,
                           legs, ce_strike=None, pe_strike=None):
@@ -850,23 +912,13 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
     contract_size = fivepaisa.get_lot_size(ft.stock_name, expiry) or 1
     lot_size = (ft.lot_size or 1) * contract_size
 
-    # Fire all 3 legs at once (same as screener path).
-    fut_remote_id = generate_remote_order_id(ft.stock_name + "_FUT")
-    ce_remote_id  = generate_remote_order_id(ft.stock_name + "_CE")
-    pe_remote_id  = generate_remote_order_id(ft.stock_name + "_PE")
-
-    futures_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", futures_scrip_code, "B",
-        _order_price(db, settings, futures_scrip_code, "B", futures_price, "FUT"), lot_size, False, fut_remote_id
-    )
-    ce_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", ce_scrip_code, "S",
-        _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False, ce_remote_id
-    )
-    pe_result = fivepaisa.place_order(
-        settings.access_token, "N", "D", pe_scrip_code, "B",
-        _order_price(db, settings, pe_scrip_code, "B", pe_premium, "PE"), lot_size, False, pe_remote_id
-    )
+    # CE -> Futures -> PE, with the PE placed only if one of the first two was
+    # accepted (see _place_collar_legs).
+    legs = _place_collar_legs(
+        db, settings, ft.stock_name, lot_size,
+        futures_scrip_code, futures_price,
+        ce_scrip_code, ce_premium,
+        pe_scrip_code, pe_premium)
 
     # Check which were accepted by the broker (RMS-level check)
     # Save & track whatever actually opened. A partial fill is no longer discarded:
@@ -882,11 +934,7 @@ def _place_collar_trade(db, settings, ft: FixedTrade):
         expiry_date=chain_result.get("expiry"),
         profit_target=ft.profit_target,
         loss_limit=ft.loss_limit,
-        legs=[
-            {"name": "FUT", "side": "B", "scrip": futures_scrip_code, "entry": futures_price, "result": futures_result, "remote": fut_remote_id},
-            {"name": "CE",  "side": "S", "scrip": ce_scrip_code,      "entry": ce_premium,    "result": ce_result,      "remote": ce_remote_id},
-            {"name": "PE",  "side": "B", "scrip": pe_scrip_code,      "entry": pe_premium,    "result": pe_result,      "remote": pe_remote_id},
-        ],
+        legs=legs,
         ce_strike=ce_strike,
         pe_strike=pe_strike,
     )
@@ -1296,23 +1344,13 @@ def run_webhook_trade(stock_name: str, force: bool = False):
             futures_price = fut_price
 
         if not is_paper:
-            # Capture remote IDs before placement — same IDs reused for fill-confirmation
-            fut_remote_id = generate_remote_order_id(stock_name + "_FUT")
-            ce_remote_id  = generate_remote_order_id(stock_name + "_CE")
-            pe_remote_id  = generate_remote_order_id(stock_name + "_PE")
-
-            futures_result = fivepaisa.place_order(
-                settings.access_token, "N", "D", futures_scrip_code, "B",
-                _order_price(db, settings, futures_scrip_code, "B", futures_price, "FUT"), lot_size, False, fut_remote_id
-            )
-            ce_result = fivepaisa.place_order(
-                settings.access_token, "N", "D", ce_scrip_code, "S",
-                _order_price(db, settings, ce_scrip_code, "S", ce_premium, "CE"), lot_size, False, ce_remote_id
-            )
-            pe_result = fivepaisa.place_order(
-                settings.access_token, "N", "D", pe_scrip_code, "B",
-                _order_price(db, settings, pe_scrip_code, "B", pe_premium, "PE"), lot_size, False, pe_remote_id
-            )
+            # CE -> Futures -> PE, with the PE placed only if one of the first two
+            # was accepted (see _place_collar_legs).
+            legs = _place_collar_legs(
+                db, settings, stock_name, lot_size,
+                futures_scrip_code, futures_price,
+                ce_scrip_code, ce_premium,
+                pe_scrip_code, pe_premium)
 
             # Save & track whatever actually opened — partial fills are kept (only the
             # filled legs are tracked), and the client is alerted about the rest.
@@ -1326,11 +1364,7 @@ def run_webhook_trade(stock_name: str, force: bool = False):
                 expiry_date=chain_result.get("expiry"),
                 profit_target=profit_target,
                 loss_limit=loss_limit,
-                legs=[
-                    {"name": "FUT", "side": "B", "scrip": futures_scrip_code, "entry": futures_price, "result": futures_result, "remote": fut_remote_id},
-                    {"name": "CE",  "side": "S", "scrip": ce_scrip_code,      "entry": ce_premium,    "result": ce_result,      "remote": ce_remote_id},
-                    {"name": "PE",  "side": "B", "scrip": pe_scrip_code,      "entry": pe_premium,    "result": pe_result,      "remote": pe_remote_id},
-                ],
+                legs=legs,
                 ce_strike=ce_strike,
                 pe_strike=pe_strike,
             )

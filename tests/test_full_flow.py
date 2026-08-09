@@ -169,7 +169,8 @@ def test_collar_trade_placed_and_saved(mock_broker):
     mock_broker.get_option_chain.return_value = chain_ok(1150)
     mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.get_lot_size.return_value = 400
-    mock_broker.place_order.side_effect = [order_ok(111), order_ok(222), order_ok(333)]
+    # Placement order is CE -> FUT -> PE, so the ids land in that sequence.
+    mock_broker.place_order.side_effect = [order_ok(222), order_ok(111), order_ok(333)]
     mock_broker.get_order_status.return_value = fill_ok()  # all legs fully executed
     mock_broker.get_market_depth.return_value = depth_ok()  # PE has live offers
 
@@ -193,6 +194,14 @@ def test_collar_trade_placed_and_saved(mock_broker):
     assert trade.pe_broker_order_id == "333"
     assert trade.is_paper_trade is False
     assert mock_broker.place_order.call_count == 3
+
+    # The client's required sequence: CE (the short) first, then Futures, then PE.
+    sides = [c[0][4] for c in mock_broker.place_order.call_args_list]
+    scrips = [c[0][3] for c in mock_broker.place_order.call_args_list]
+    assert sides == ["S", "B", "B"], f"CE sells first, got {sides}"
+    assert scrips[1] == "62620", f"futures must be second, got {scrips}"
+    assert scrips[0] == str(trade.ce_scrip_code), "CE must be first"
+    assert scrips[2] == str(trade.pe_scrip_code), "PE must be last"
 
 
 @patch("bot.trade_manager.fivepaisa")
@@ -887,10 +896,12 @@ def test_partial_fill_tracks_open_legs_and_emails(mock_broker):
     mock_broker.get_option_chain.return_value = chain_ok(1150)
     mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.get_lot_size.return_value = 400
-    # All 3 fired at once: Futures accepted, CE rejected, PE rejected
+    # Order is CE -> FUT -> PE. CE rejected, Futures accepted -> PE is still
+    # attempted (one of the two opened, so there IS something to hedge), but the
+    # broker rejects it too.
     mock_broker.place_order.side_effect = [
-        order_ok(111),
         {"success": False, "error": "RMS reject CE"},
+        order_ok(111),
         {"success": False, "error": "RMS reject PE"},
     ]
     mock_broker.get_order_status.return_value = fill_ok()  # the accepted FUT leg fills
@@ -901,8 +912,7 @@ def test_partial_fill_tracks_open_legs_and_emails(mock_broker):
             with patch("bot.trade_manager.time"):
                 trade_manager.run_fixed_trades()
 
-    # All 3 order calls fired at once — no square-off (no extra calls)
-    assert mock_broker.place_order.call_count == 3, "all 3 legs fired at once"
+    assert mock_broker.place_order.call_count == 3, "PE is still tried when Futures opened"
     mock_alert.assert_called_once()   # client alerted about the failed legs
 
     db = TestSession()
@@ -929,10 +939,10 @@ def test_webhook_partial_fill_tracks_open_legs(mock_broker):
     mock_broker.get_option_chain.return_value = chain_ok(300)
     mock_broker.get_futures_scrip_code.return_value = "62620"
     mock_broker.get_lot_size.return_value = 400
-    # FUT accepted, CE accepted, PE rejected (illiquid contract)
+    # Order is CE -> FUT -> PE: CE accepted, FUT accepted, PE rejected (illiquid)
     mock_broker.place_order.side_effect = [
-        order_ok(201),
         order_ok(202),
+        order_ok(201),
         {"success": False, "error": "Trading not allowed in illiquid contract"},
     ]
     mock_broker.get_order_status.return_value = fill_ok()  # accepted legs fill
@@ -955,6 +965,93 @@ def test_webhook_partial_fill_tracks_open_legs(mock_broker):
     assert trade.ce_broker_order_id == "202"
     assert trade.pe_broker_order_id is None   # the illiquid PE is left empty
     assert trade.pe_scrip_code is None
+
+
+# ── Entry order: CE -> FUT, and PE only if one of them was accepted ──────────
+
+@patch("bot.trade_manager.fivepaisa")
+def test_pe_is_skipped_when_both_ce_and_futures_are_rejected(mock_broker):
+    """
+    The PE is protection. If neither the CE short nor the futures position opened
+    there is nothing to protect, so buying a PE would only pay premium for a hedge
+    against a position that does not exist.
+    """
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.place_order.side_effect = [
+        {"success": False, "error": "RMS reject CE"},
+        {"success": False, "error": "RMS reject FUT"},
+    ]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_partial_fill_alert"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    assert mock_broker.place_order.call_count == 2, \
+        "only CE and Futures may be attempted — the PE must NOT be placed"
+    sides = [c[0][4] for c in mock_broker.place_order.call_args_list]
+    assert sides == ["S", "B"], f"CE then Futures, got {sides}"
+
+    db = TestSession()
+    count = db.query(Trade).count()
+    db.close()
+    assert count == 0, "nothing opened, so no trade should be recorded"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_pe_is_placed_when_only_the_ce_is_accepted(mock_broker):
+    """CE opened -> there IS a short to hedge, so the PE must still be placed."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.get_order_status.return_value = fill_ok()
+    mock_broker.place_order.side_effect = [
+        order_ok(222),                                        # CE accepted
+        {"success": False, "error": "RMS reject FUT"},        # Futures rejected
+        order_ok(333),                                        # PE still attempted
+    ]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_partial_fill_alert"):
+            with patch("notifications.email.send_trade_opened_email"):
+                with patch("bot.trade_manager.time"):
+                    trade_manager.run_fixed_trades()
+
+    assert mock_broker.place_order.call_count == 3, \
+        "the CE opened, so the PE hedge must still be placed"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_pe_is_placed_when_only_the_futures_is_accepted(mock_broker):
+    """Futures opened -> still a position to hedge, so the PE goes in."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.get_order_status.return_value = fill_ok()
+    mock_broker.place_order.side_effect = [
+        {"success": False, "error": "RMS reject CE"},         # CE rejected
+        order_ok(111),                                        # Futures accepted
+        order_ok(333),                                        # PE still attempted
+    ]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_partial_fill_alert"):
+            with patch("notifications.email.send_trade_opened_email"):
+                with patch("bot.trade_manager.time"):
+                    trade_manager.run_fixed_trades()
+
+    assert mock_broker.place_order.call_count == 3
 
 
 # ── Traceback debugging on real-trade errors ─────────────────────────────────
