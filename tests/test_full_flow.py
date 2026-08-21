@@ -18,6 +18,7 @@ from models.watchlist import Watchlist
 from models.settings import Settings
 from models.fixed_trades import FixedTrade
 from models.trade import Trade
+from utils.helpers import get_ist_now
 from models.log import Log
 from bot import trade_manager
 
@@ -965,6 +966,160 @@ def test_webhook_partial_fill_tracks_open_legs(mock_broker):
     assert trade.ce_broker_order_id == "202"
     assert trade.pe_broker_order_id is None   # the illiquid PE is left empty
     assert trade.pe_scrip_code is None
+
+
+# ── One trade per stock per day ──────────────────────────────────────────────
+#
+# Once a stock has been traded today — and CLOSED, for profit, loss, expiry or a
+# manual close — it must not be re-entered the same session. The existing
+# "open trade already exists" check cannot cover this, because by then the trade is
+# closed. The rule is source-agnostic: a stock the screener closed this morning
+# must not be re-opened by a fixed trade this afternoon, and vice versa.
+
+def _closed_trade_today(name="INFY", source="fixed", reason="profit"):
+    t = make_open_trade(name=name)
+    t.trade_source = source
+    t.status = "closed"
+    t.close_reason = reason
+    t.pnl = 5000.0
+    t.placed_at = get_ist_now()
+    t.closed_at = get_ist_now()
+    return t
+
+
+def _wire_tradeable(mock_broker):
+    """
+    Everything the collar path needs to reach place_order. WITHOUT this the flow
+    dies early on a missing quote and the test would pass whether or not the guard
+    exists — i.e. pass for the wrong reason.
+    """
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.get_order_status.return_value = fill_ok()
+    mock_broker.place_order.side_effect = [order_ok(222), order_ok(111), order_ok(333)]
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_fixed_trade_not_retaken_after_closing_today(mock_broker):
+    _wire_tradeable(mock_broker)
+    add(make_settings(), make_watchlist(), make_fixed_trade(),
+        _closed_trade_today(reason="profit"))
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    assert not mock_broker.place_order.called, \
+        "a stock that already closed today must not be re-entered"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_same_day_block_applies_to_every_close_reason(mock_broker):
+    """Profit, loss, expiry or manual — all of them stop a re-entry."""
+    for reason in ("profit", "loss", "expiry", "manual"):
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        mock_broker.reset_mock()
+        _wire_tradeable(mock_broker)
+        add(make_settings(), make_watchlist(), make_fixed_trade(),
+            _closed_trade_today(reason=reason))
+
+        with patch("bot.trade_manager.SessionLocal", TestSession):
+            with patch("notifications.email.send_trade_opened_email"):
+                with patch("bot.trade_manager.time"):
+                    trade_manager.run_fixed_trades()
+
+        assert not mock_broker.place_order.called, f"close_reason={reason} should block re-entry"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_fixed_trade_blocked_by_a_screener_trade_closed_today(mock_broker):
+    """Cross-source: the screener opened and closed it, so the fixed row must not re-fire."""
+    _wire_tradeable(mock_broker)
+    add(make_settings(), make_watchlist(), make_fixed_trade(),
+        _closed_trade_today(source="webhook", reason="profit"))
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    assert not mock_broker.place_order.called
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_yesterdays_closed_trade_does_not_block_today(mock_broker):
+    """The guard is same-day only — a stock closed yesterday is tradeable again."""
+    from datetime import timedelta
+    old = _closed_trade_today(reason="profit")
+    old.placed_at = get_ist_now() - timedelta(days=2)
+    old.closed_at = get_ist_now() - timedelta(days=1)
+    add(make_settings(), make_watchlist(), make_fixed_trade(), old)
+
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.get_order_status.return_value = fill_ok()
+    mock_broker.place_order.side_effect = [order_ok(222), order_ok(111), order_ok(333)]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    assert mock_broker.place_order.called, "yesterday's trade must not block today"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_manual_run_now_can_override_the_same_day_block(mock_broker):
+    """Clicking Run Now is deliberate, so it bypasses the guard (like Chartink's)."""
+    add(make_settings(), make_watchlist(), make_fixed_trade(),
+        _closed_trade_today(reason="profit"))
+
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.get_order_status.return_value = fill_ok()
+    mock_broker.place_order.side_effect = [order_ok(222), order_ok(111), order_ok(333)]
+
+    db = TestSession()
+    ft_id = db.query(FixedTrade).first().id
+    db.close()
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_single_fixed_trade(ft_id)
+
+    assert mock_broker.place_order.called, "a manual Run Now should still fire"
+
+
+@patch("bot.trade_manager.fivepaisa")
+def test_fixed_trade_still_fires_normally_when_nothing_traded_today(mock_broker):
+    """No regression: an untouched stock still trades."""
+    add(make_settings(), make_watchlist(), make_fixed_trade())
+    mock_broker.get_market_quote.return_value = quote_ok(1126.3)
+    mock_broker.get_option_chain.return_value = chain_ok(1150)
+    mock_broker.get_futures_scrip_code.return_value = "62620"
+    mock_broker.get_lot_size.return_value = 400
+    mock_broker.get_market_depth.return_value = depth_ok()
+    mock_broker.get_order_status.return_value = fill_ok()
+    mock_broker.place_order.side_effect = [order_ok(222), order_ok(111), order_ok(333)]
+
+    with patch("bot.trade_manager.SessionLocal", TestSession):
+        with patch("notifications.email.send_trade_opened_email"):
+            with patch("bot.trade_manager.time"):
+                trade_manager.run_fixed_trades()
+
+    assert mock_broker.place_order.call_count == 3
 
 
 # ── Entry order: CE -> FUT, and PE only if one of them was accepted ──────────

@@ -316,6 +316,27 @@ def _record_screener_attempt(db, stock_name: str, is_paper: bool):
     _save_log(db, "INFO", f"Screener attempt recorded: {stock_name.upper()} [{mode}]")
 
 
+def _traded_today(db, stock_name: str) -> bool:
+    """
+    True if this stock has ALREADY had a trade today — either opened today, or
+    closed today for any reason (profit, loss, expiry, or a manual close).
+
+    The rule is one trade per stock per day. Once a position has been taken and
+    closed, re-entering the same name the same session would double the day's
+    exposure to a stock the bot has already had its answer from — and on a fixed
+    trade it would keep re-firing every time the scheduler came round.
+
+    Deliberately source-agnostic: a stock the SCREENER closed this morning must not
+    be re-opened by a FIXED trade this afternoon, and vice versa.
+    """
+    from sqlalchemy import or_
+    today = str(get_ist_now().date())
+    return db.query(Trade).filter(
+        Trade.stock_name.ilike(stock_name),
+        or_(Trade.placed_at >= today, Trade.closed_at >= today),
+    ).count() > 0
+
+
 def _screener_attempted_today(db, stock_name: str, is_paper: bool) -> bool:
     """True if we already attempted this stock today in this mode (success OR failure)."""
     today_str = str(get_ist_now().date())
@@ -799,17 +820,25 @@ def run_single_fixed_trade(trade_id: int):
             _save_log(db, "INFO", f"{ft.stock_name} manual run skipped: trade is not active")
             return
 
-        _save_log(db, "INFO", f"Manually running fixed trade: {ft.stock_name}")
+        _save_log(db, "INFO",
+                  f"Manually running fixed trade: {ft.stock_name} "
+                  f"(manual run — bypasses the once-per-day guard)")
         try:
-            _process_fixed_trade(db, settings, ft)
+            _process_fixed_trade(db, settings, ft, force=True)
         except Exception as e:
             _save_log(db, "ERROR", f"Unexpected error for {ft.stock_name}: {_exc_detail(e)}")
     finally:
         db.close()
 
 
-def _process_fixed_trade(db, settings, ft: FixedTrade):
-    """Decide how to handle a single fixed trade row."""
+def _process_fixed_trade(db, settings, ft: FixedTrade, force: bool = False):
+    """
+    Decide how to handle a single fixed trade row.
+
+    `force=True` is the client clicking "Run Now" — a deliberate act, so it bypasses
+    the once-per-day guard (matching how the manual Chartink run already behaves).
+    The automatic scheduler always runs with force=False.
+    """
 
     # Check Number 2 watchlist first
     if not _is_in_watchlist(db, ft.stock_name):
@@ -823,6 +852,14 @@ def _process_fixed_trade(db, settings, ft: FixedTrade):
     ).first()
     if existing:
         _save_log(db, "INFO", f"{ft.stock_name} skipped: open trade already exists")
+        return
+
+    # One trade per stock per day. Covers the case the "open trade" check above
+    # cannot: a trade that was taken earlier today and has already CLOSED (profit,
+    # loss, expiry or manual). Without this the row would simply re-fire.
+    if not force and _traded_today(db, ft.stock_name):
+        _save_log(db, "INFO",
+                  f"{ft.stock_name} skipped: already traded today (one trade per stock per day)")
         return
 
     if ft.month_type == "option":
@@ -1191,6 +1228,15 @@ def run_webhook_trade(stock_name: str, force: bool = False):
         # "Run Chartink Trades" click passes force=True to override this.
         if not force and _screener_attempted_today(db, stock_name, is_paper):
             _save_log(db, "INFO", f"Screener trade for {stock_name} skipped: already attempted today (once per day)")
+            return
+
+        # The attempt marker above only knows about SCREENER attempts. This also
+        # blocks a stock that was traded today from the FIXED-trades side and has
+        # since closed — one trade per stock per day, whichever source opened it.
+        if not force and _traded_today(db, stock_name):
+            _save_log(db, "INFO",
+                      f"Screener trade for {stock_name} skipped: already traded today "
+                      f"(one trade per stock per day)")
             return
 
         watchlist_stock = db.query(Watchlist).filter(Watchlist.stock_name.ilike(stock_name)).first()
